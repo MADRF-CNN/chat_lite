@@ -1,0 +1,19 @@
+[package]
+name = "chat-lite"
+version = "0.2.0"
+description = "A lightweight private chat client for macOS"
+authors = ["Chat Lite"]
+edition = "2021"
+
+[lib]
+name = "chat_lite_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+keyring = { version = "3", features = ["apple-native"] }
+rfd = "0.15"
+serde = { version = "1", features = ["derive"] }
+tauri = { version = "2", features = [] }

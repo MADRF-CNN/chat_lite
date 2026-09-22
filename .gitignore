@@ -1,0 +1,13 @@
+node_modules/
+.pnpm-store/
+dist/
+release/
+apps/desktop/src-tauri/target/
+.env
+.env.local
+coverage/
+*.log
+.DS_Store
+apps/server/uploads/
+apps/server/prisma/dev.db
+*.tsbuildinfo

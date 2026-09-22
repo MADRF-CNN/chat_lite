@@ -1,0 +1,148 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  USER
+  ADMIN
+}
+
+enum ConversationType {
+  DIRECT
+  GROUP
+}
+
+model User {
+  id             String               @id @default(cuid())
+  username       String               @unique
+  displayName    String
+  passwordHash   String
+  publicKey      String?              @db.Text
+  role           UserRole             @default(USER)
+  createdAt      DateTime             @default(now())
+  updatedAt      DateTime             @updatedAt
+  memberships    ConversationMember[]
+  messages       Message[]
+  refreshTokens  RefreshToken[]
+  ownedGroups    Conversation[]       @relation("GroupOwner")
+  createdInvites InviteCode[]         @relation("InviteCreator")
+  keyEnvelopes   ConversationKeyEnvelope[]
+}
+
+model InviteCode {
+  id          String   @id @default(cuid())
+  codeHash    String   @unique
+  maxUses     Int      @default(1)
+  usedCount   Int      @default(0)
+  expiresAt   DateTime?
+  createdAt   DateTime @default(now())
+  createdById String?
+  createdBy   User?    @relation("InviteCreator", fields: [createdById], references: [id], onDelete: SetNull)
+}
+
+model RefreshToken {
+  id        String   @id @default(cuid())
+  tokenHash String   @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime @default(now())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Conversation {
+  id          String               @id @default(cuid())
+  type        ConversationType
+  name        String?
+  directKey   String?              @unique
+  ownerId     String?
+  owner       User?                @relation("GroupOwner", fields: [ownerId], references: [id], onDelete: SetNull)
+  createdAt   DateTime             @default(now())
+  updatedAt   DateTime             @updatedAt
+  members     ConversationMember[]
+  messages    Message[]
+  keys        ConversationKey[]
+
+  @@index([updatedAt])
+}
+
+model ConversationMember {
+  conversationId   String
+  userId           String
+  joinedAt         DateTime     @default(now())
+  lastReadMessageId String?
+  conversation     Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  user             User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  lastReadMessage  Message?     @relation("LastReadMessage", fields: [lastReadMessageId], references: [id], onDelete: SetNull)
+
+  @@id([conversationId, userId])
+  @@index([userId])
+}
+
+model Message {
+  id               String               @id @default(cuid())
+  clientId         String
+  text             String?
+  ciphertext       String?              @db.Text
+  nonce            String?
+  keyVersion       Int?
+  createdAt        DateTime             @default(now())
+  conversationId   String
+  senderId         String
+  conversation     Conversation         @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender           User                 @relation(fields: [senderId], references: [id], onDelete: Restrict)
+  attachments      Attachment[]
+  readByMembership ConversationMember[] @relation("LastReadMessage")
+
+  @@unique([senderId, clientId])
+  @@index([conversationId, createdAt])
+}
+
+model ConversationKey {
+  id             String                    @id @default(cuid())
+  version        Int
+  createdAt      DateTime                  @default(now())
+  conversationId String
+  conversation   Conversation              @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  envelopes      ConversationKeyEnvelope[]
+
+  @@unique([conversationId, version])
+  @@index([conversationId, createdAt])
+}
+
+model ConversationKeyEnvelope {
+  conversationKeyId String
+  userId            String
+  encryptedKey      String                 @db.Text
+  conversationKey   ConversationKey        @relation(fields: [conversationKeyId], references: [id], onDelete: Cascade)
+  user               User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([conversationKeyId, userId])
+  @@index([userId])
+}
+
+model Attachment {
+  id            String   @id @default(cuid())
+  objectKey     String   @unique
+  thumbnailKey  String
+  originalName  String
+  mimeType      String
+  size          Int
+  width         Int
+  height        Int
+  createdAt     DateTime @default(now())
+  uploadedById  String
+  messageId     String?
+  encrypted     Boolean  @default(false)
+  message       Message? @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@index([uploadedById])
+  @@index([messageId])
+}

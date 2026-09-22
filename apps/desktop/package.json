@@ -1,0 +1,32 @@
+{
+  "name": "@chat-lite/desktop",
+  "version": "0.2.0",
+  "description": "A lightweight private chat client for macOS",
+  "author": "Chat Lite",
+  "private": true,
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "RUSTC=\"$(rustup which rustc)\" tauri build --target universal-apple-darwin --bundles dmg",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "pnpm typecheck",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@chat-lite/shared": "workspace:*",
+    "@tauri-apps/api": "^2.8.0",
+    "@vitejs/plugin-react": "^5.0.2",
+    "lucide-react": "^0.544.0",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "socket.io-client": "^4.8.1"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.8.4",
+    "@types/node": "^24.5.2",
+    "@types/react": "^19.1.13",
+    "@types/react-dom": "^19.1.9",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.7",
+    "vitest": "^3.2.4"
+  }
+}

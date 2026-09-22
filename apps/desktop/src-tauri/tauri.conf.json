@@ -1,0 +1,37 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Chat Lite",
+  "version": "0.2.0",
+  "identifier": "com.chatlite.desktop",
+  "build": {
+    "beforeDevCommand": "pnpm exec vite",
+    "devUrl": "http://localhost:5173",
+    "beforeBuildCommand": "pnpm exec vite build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Chat Lite",
+        "width": 1180,
+        "height": 760,
+        "minWidth": 900,
+        "minHeight": 620,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: blob: data:; connect-src 'self' http://localhost:3000 ws://localhost:3000 https://101.34.254.65 wss://101.34.254.65"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["dmg"],
+    "category": "SocialNetworking",
+    "shortDescription": "A lightweight private chat client",
+    "macOS": { "minimumSystemVersion": "10.15" },
+    "icon": ["icons/icon.icns", "icons/icon.png"]
+  }
+}
