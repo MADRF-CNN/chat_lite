@@ -10,6 +10,7 @@ const tauriBridge = {
   saveSecureValue: (name: string, value: string | null) => invoke<void>("save_secure_value", { name, value }),
   loadSecureValue: (name: string) => invoke<string | null>("load_secure_value", { name }),
   saveFile: (name: string, bytes: Uint8Array) => invoke<boolean>("save_file", { name, bytes: Array.from(bytes) }),
+  setEdgeCollapsed: (collapsed: boolean) => invoke<void>("set_edge_collapsed", { collapsed }),
 };
 
 export const desktopBridge = ("__TAURI_INTERNALS__" in window ? tauriBridge : window.desktop) ?? {
@@ -23,6 +24,7 @@ export const desktopBridge = ("__TAURI_INTERNALS__" in window ? tauriBridge : wi
     const anchor = document.createElement("a"); anchor.href = url; anchor.download = name; anchor.click();
     URL.revokeObjectURL(url); return true;
   },
+  setEdgeCollapsed: async () => undefined,
 };
 let accessToken: string | null = null;
 let refreshPromise: Promise<boolean> | null = null;

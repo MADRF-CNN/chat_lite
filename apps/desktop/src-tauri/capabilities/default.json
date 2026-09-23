@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Default Chat Lite desktop permissions",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "core:window:allow-start-dragging", "notification:default"]
 }

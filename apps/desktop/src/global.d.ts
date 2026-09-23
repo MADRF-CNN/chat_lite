@@ -8,6 +8,7 @@ declare global {
       saveSecureValue(name: string, value: string | null): Promise<void>;
       loadSecureValue(name: string): Promise<string | null>;
       saveFile(name: string, bytes: Uint8Array): Promise<boolean>;
+      setEdgeCollapsed(collapsed: boolean): Promise<void>;
     };
   }
 }
