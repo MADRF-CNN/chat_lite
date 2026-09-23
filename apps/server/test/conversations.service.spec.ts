@@ -16,4 +16,10 @@ describe("ConversationsService", () => {
     await service.createGroup("owner", "Team", ["one", "one", "two"]);
     expect(prisma.conversation.create.mock.calls[0][0].data.members.create).toHaveLength(3);
   });
+
+  it("returns an explicit empty key response for a new conversation", async () => {
+    const prisma = { conversationMember: { findUnique: jest.fn().mockResolvedValue({}) }, conversationKey: { findFirst: jest.fn().mockResolvedValue(null) } };
+    const service = new ConversationsService(prisma as never);
+    await expect(service.latestKey("conversation", "user")).resolves.toEqual({ version: 0, encryptedKey: null, memberIds: [] });
+  });
 });

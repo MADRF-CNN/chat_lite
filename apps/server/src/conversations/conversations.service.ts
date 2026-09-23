@@ -161,7 +161,7 @@ export class ConversationsService {
       orderBy: { version: "desc" },
       include: { envelopes: { select: { userId: true, encryptedKey: true } } },
     });
-    if (!key) return null;
+    if (!key) return { version: 0, encryptedKey: null, memberIds: [] };
     return {
       version: key.version,
       encryptedKey: key.envelopes.find((item) => item.userId === userId)?.encryptedKey ?? null,
