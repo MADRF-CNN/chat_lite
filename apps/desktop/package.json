@@ -6,7 +6,7 @@
   "private": true,
   "scripts": {
     "dev": "tauri dev",
-    "build": "RUSTC=\"$(rustup which rustc)\" tauri build --target universal-apple-darwin --bundles dmg",
+    "build": "CI=true RUSTC=\"$(rustup which rustc)\" tauri build --target universal-apple-darwin --bundles dmg",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "pnpm typecheck",
     "test": "vitest run"
