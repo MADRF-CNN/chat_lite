@@ -11,6 +11,8 @@ const VERSION = "0.1.0";
 function findDefaultCa(): string | undefined {
   const candidates = [
     resolve(process.cwd(), "chat-lite-private-ca.crt"),
+    resolve(__dirname, "chat-lite-private-ca.crt"),
+    resolve(__dirname, "../chat-lite-private-ca.crt"),
     resolve(__dirname, "../../chat-lite-private-ca.crt"),
     resolve(__dirname, "../../../chat-lite-private-ca.crt"),
   ];
