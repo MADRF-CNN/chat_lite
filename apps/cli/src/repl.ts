@@ -18,6 +18,8 @@ const SLASH_COMMANDS = [
   "/group",
   "/whoami",
   "/clear",
+  "/mask",
+  "/unmask",
   "/quit",
 ];
 
@@ -80,6 +82,69 @@ function conversationTitle(conversation: ConversationDto, meId: string) {
   return other ? `${other.displayName} (@${other.username})` : "私聊";
 }
 
+function simulateCodexOutput(prompt: string) {
+  const cleanPrompt = prompt.slice(0, 60);
+  const snippets = [
+    `// [Codex] Synthesized implementation for "${cleanPrompt}"
+export async function processTask<T>(input: T[], options?: TaskOptions): Promise<Result<T>> {
+  const pipeline = new StreamTransformer({ concurrency: 4, backpressure: true });
+  const results = await pipeline.mapParallel(input, async (item) => {
+    return transformNode(item, options?.strict ?? false);
+  });
+  return { status: "success", count: results.length, data: results };
+}
+// AST analysis complete: 0 warnings, optimized via inline heuristics.`,
+
+    `# [Codex] Generated pipeline script for "${cleanPrompt}"
+def optimize_execution_flow(records: list[dict], threshold: float = 0.95) -> dict:
+    """Vectorized stream processor with sliding window aggregation."""
+    filtered = [r for r in records if r.get("score", 0) >= threshold]
+    summary = {
+        "total": len(records),
+        "retained": len(filtered),
+        "ratio": round(len(filtered) / max(len(records), 1), 4),
+    }
+    return summary
+# Compilation: LLVM IR generated (target: x86_64-apple-darwin).`,
+
+    `// [Codex] Concurrent worker implementation for "${cleanPrompt}"
+pub struct TaskDispatcher {
+    pool: ThreadPool,
+    metrics: Arc<AtomicU64>,
+}
+
+impl TaskDispatcher {
+    pub fn dispatch<F>(&self, job: F) -> Result<(), DispatchError>
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        self.metrics.fetch_add(1, Ordering::Relaxed);
+        self.pool.execute(job);
+        Ok(())
+    }
+}
+// Benchmark: latency 1.4µs/op, memory footprint negligible.`,
+
+    `-- [Codex] Query plan and optimizer for "${cleanPrompt}"
+SELECT 
+    DATE_TRUNC('hour', created_at) AS event_hour,
+    COUNT(DISTINCT session_id) AS active_sessions,
+    PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY response_time_ms) AS p99_latency
+FROM telemetry_events
+WHERE status_code < 500 AND partition_key >= CURRENT_DATE - INTERVAL '7 days'
+GROUP BY 1
+ORDER BY 1 DESC;
+-- Query plan: Index Scan using idx_telemetry_created_at (cost=0.42..18.25 rows=240)`
+  ];
+
+  const selected = snippets[Math.floor(Math.random() * snippets.length)] ?? "";
+  console.log(c.dim("[codex] Analyzing instruction..."));
+  console.log(c.dim("[codex] Generating candidate implementation (temperature=0.2):"));
+  console.log("");
+  console.log(c.brightWhite(selected));
+  console.log("");
+}
+
 export async function runRepl(client: Client) {
   let conversations = await client.listConversations();
   if (!conversations.length) {
@@ -91,7 +156,23 @@ export async function runRepl(client: Client) {
   for (const item of conversations) conversationMap.set(item.id, item);
   const localClientIds = new Set<string>();
 
+  let isMasked = false;
+  let maskedUnreadCount = 0;
+
+  function printMaskedHeader() {
+    console.clear();
+    console.log(c.bold(c.brightWhite("OpenAI Codex (v0.14.2) [Interactive Shell]")));
+    console.log(c.dim(`Workspace: ${process.cwd()}`));
+    console.log(c.dim("Model: codex-davinci-002-optimized | Context: 8k tokens | Mode: Code Synthesis"));
+    console.log(c.gray("-".repeat(70)));
+    console.log(c.dim("Type instructions or code prompt. Type /unmask or exit to resume."));
+    console.log("");
+  }
+
   function getPrompt() {
+    if (isMasked) {
+      return `${c.bold(c.brightCyan("codex"))} ${c.gray(">")} `;
+    }
     if (!activeConversation) return `${c.gray("[无会话]")} ${c.bold(c.cyan(">"))} `;
     const title = activeConversation.type === "GROUP"
       ? (activeConversation.name ?? "群聊")
@@ -220,6 +301,12 @@ export async function runRepl(client: Client) {
     }
     if (!conversation) return;
 
+    if (isMasked) {
+      maskedUnreadCount++;
+      safePrint(rl, c.dim(`[daemon] background telemetry synced (${maskedUnreadCount} items)`));
+      return;
+    }
+
     if (activeConversation && incoming.conversationId === activeConversation.id) {
       try {
         const decrypted = await client.e2ee.decryptMessage(incoming, conversation);
@@ -268,10 +355,36 @@ export async function runRepl(client: Client) {
           console.log(`  ${c.bold(c.brightYellow("/open"))}    ${c.cyan("<用户名>")}      ${c.gray(" ".repeat(14))} 发起或进入私聊`);
           console.log(`  ${c.bold(c.brightYellow("/group"))}   ${c.cyan("<群名> <成员>")}   ${c.gray(" ".repeat(10))} 创建新群聊`);
           console.log(`  ${c.bold(c.brightYellow("/whoami"))}  ${c.gray(" ".repeat(13))}   ${c.gray(" ".repeat(14))} 查看当前账号与加密状态`);
+          console.log(`  ${c.bold(c.brightYellow("/mask"))}    ${c.gray(" ".repeat(13))}   ${c.gray("(伪装模式)")}   切换到 Codex 代码伪装掩护`);
+          console.log(`  ${c.bold(c.brightYellow("/unmask"))}  ${c.gray(" ".repeat(13))}   ${c.gray("(解除伪装)")}   退出掩护恢复聊天 (简写: /chat)`);
           console.log(`  ${c.bold(c.brightYellow("/clear"))}   ${c.gray(" ".repeat(13))}   ${c.gray("(简写: /c)")}   清屏并刷新当前会话`);
           console.log(`  ${c.bold(c.brightYellow("/quit"))}    ${c.gray(" ".repeat(13))}   ${c.gray("(简写: /q)")}   退出交互会话`);
           printBorder();
           console.log("");
+          break;
+
+        case "mask":
+        case "stealth":
+        case "boss":
+          isMasked = true;
+          maskedUnreadCount = 0;
+          printMaskedHeader();
+          rl.setPrompt(getPrompt());
+          break;
+
+        case "unmask":
+        case "chat":
+          isMasked = false;
+          printHeader();
+          if (activeConversation) {
+            printSectionHeader("最近消息");
+            await showHistory(activeConversation, 10);
+          }
+          if (maskedUnreadCount > 0) {
+            console.log(c.bold(c.brightYellow(`[* 掩护期间收到 ${maskedUnreadCount} 条新消息]`)));
+            maskedUnreadCount = 0;
+          }
+          rl.setPrompt(getPrompt());
           break;
 
         case "list":
@@ -404,10 +517,14 @@ export async function runRepl(client: Client) {
 
         case "clear":
         case "c":
-          printHeader();
-          if (activeConversation) {
-            printSectionHeader("最近消息");
-            await showHistory(activeConversation, 10);
+          if (isMasked) {
+            printMaskedHeader();
+          } else {
+            printHeader();
+            if (activeConversation) {
+              printSectionHeader("最近消息");
+              await showHistory(activeConversation, 10);
+            }
           }
           break;
 
@@ -423,6 +540,29 @@ export async function runRepl(client: Client) {
           break;
       }
 
+      rl.prompt();
+      return;
+    }
+
+    // If in masked mode, simulate Codex response instead of sending chat message!
+    if (isMasked) {
+      if (line.toLowerCase() === "exit" || line.toLowerCase() === "quit" || line.toLowerCase() === "unmask") {
+        isMasked = false;
+        printHeader();
+        if (activeConversation) {
+          printSectionHeader("最近消息");
+          await showHistory(activeConversation, 10);
+        }
+        if (maskedUnreadCount > 0) {
+          console.log(c.bold(c.brightYellow(`[* 掩护期间收到 ${maskedUnreadCount} 条新消息]`)));
+          maskedUnreadCount = 0;
+        }
+        rl.setPrompt(getPrompt());
+        rl.prompt();
+        return;
+      }
+
+      simulateCodexOutput(line);
       rl.prompt();
       return;
     }
