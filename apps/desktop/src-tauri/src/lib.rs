@@ -1,5 +1,7 @@
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use tauri::Manager;
+use tauri::{AppHandle, Manager};
 
 #[derive(Clone)]
 struct WindowGeometry {
@@ -10,52 +12,77 @@ struct WindowGeometry {
 #[derive(Default)]
 struct EdgeWindowState(Mutex<Option<WindowGeometry>>);
 
-#[tauri::command]
-fn save_refresh_token(token: Option<String>) -> Result<(), String> {
-    let entry = keyring::Entry::new("com.chatlite.desktop", "refresh-token")
-        .map_err(|error| error.to_string())?;
-    match token {
-        Some(value) if !value.is_empty() => entry.set_password(&value).map_err(|error| error.to_string()),
-        _ => {
-            let _ = entry.delete_credential();
-            Ok(())
-        }
-    }
+#[cfg(unix)]
+fn lock_down(path: &Path, mode: u32) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(mode)).map_err(|error| error.to_string())
 }
 
-#[tauri::command]
-fn load_refresh_token() -> Result<Option<String>, String> {
-    let entry = keyring::Entry::new("com.chatlite.desktop", "refresh-token")
-        .map_err(|error| error.to_string())?;
-    match entry.get_password() {
-        Ok(value) => Ok(Some(value)),
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(error) => Err(error.to_string()),
-    }
+#[cfg(not(unix))]
+fn lock_down(_path: &Path, _mode: u32) -> Result<(), String> {
+    Ok(())
 }
 
-#[tauri::command]
-fn save_secure_value(name: String, value: Option<String>) -> Result<(), String> {
-    let entry = keyring::Entry::new("com.chatlite.desktop.e2ee", &name)
-        .map_err(|error| error.to_string())?;
+fn secret_path(app: &AppHandle, name: &str) -> Result<PathBuf, String> {
+    let file: String = name
+        .chars()
+        .map(|value| if value.is_ascii_alphanumeric() || value == '-' || value == '_' { value } else { '_' })
+        .collect();
+    let dir = app.path().app_data_dir().map_err(|error| error.to_string())?.join("secrets");
+    Ok(dir.join(file))
+}
+
+fn write_secret_path(path: &Path, value: Option<String>) -> Result<(), String> {
     match value {
-        Some(value) if !value.is_empty() => entry.set_password(&value).map_err(|error| error.to_string()),
-        _ => {
-            let _ = entry.delete_credential();
-            Ok(())
+        Some(value) if !value.is_empty() => {
+            let dir = path.parent().ok_or_else(|| "密钥路径无效".to_string())?;
+            fs::create_dir_all(dir).map_err(|error| error.to_string())?;
+            lock_down(dir, 0o700)?;
+            fs::write(path, value).map_err(|error| error.to_string())?;
+            lock_down(path, 0o600)
         }
+        _ => match fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.to_string()),
+        },
     }
 }
 
-#[tauri::command]
-fn load_secure_value(name: String) -> Result<Option<String>, String> {
-    let entry = keyring::Entry::new("com.chatlite.desktop.e2ee", &name)
-        .map_err(|error| error.to_string())?;
-    match entry.get_password() {
+fn read_secret_path(path: &Path) -> Result<Option<String>, String> {
+    match fs::read_to_string(path) {
         Ok(value) => Ok(Some(value)),
-        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.to_string()),
     }
+}
+
+fn write_secret(app: &AppHandle, name: &str, value: Option<String>) -> Result<(), String> {
+    write_secret_path(&secret_path(app, name)?, value)
+}
+
+fn read_secret(app: &AppHandle, name: &str) -> Result<Option<String>, String> {
+    read_secret_path(&secret_path(app, name)?)
+}
+
+#[tauri::command]
+fn save_refresh_token(app: AppHandle, token: Option<String>) -> Result<(), String> {
+    write_secret(&app, "refresh-token", token)
+}
+
+#[tauri::command]
+fn load_refresh_token(app: AppHandle) -> Result<Option<String>, String> {
+    read_secret(&app, "refresh-token")
+}
+
+#[tauri::command]
+fn save_secure_value(app: AppHandle, name: String, value: Option<String>) -> Result<(), String> {
+    write_secret(&app, &name, value)
+}
+
+#[tauri::command]
+fn load_secure_value(app: AppHandle, name: String) -> Result<Option<String>, String> {
+    read_secret(&app, &name)
 }
 
 #[tauri::command]
@@ -102,7 +129,7 @@ fn set_edge_collapsed(
         window.set_decorations(true).map_err(|error| error.to_string())?;
         window.set_resizable(true).map_err(|error| error.to_string())?;
         window.set_always_on_top(false).map_err(|error| error.to_string())?;
-        window.set_min_size(Some(tauri::LogicalSize::new(520.0, 420.0))).map_err(|error| error.to_string())?;
+        window.set_min_size(Some(tauri::LogicalSize::new(320.0, 300.0))).map_err(|error| error.to_string())?;
         if let Some(geometry) = geometry {
             window.set_size(geometry.size).map_err(|error| error.to_string())?;
             window.set_position(geometry.position).map_err(|error| error.to_string())?;
@@ -137,4 +164,43 @@ pub fn run() {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{read_secret_path, write_secret_path};
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn sandbox(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("chat-lite-test-{name}"));
+        let _ = fs::remove_dir_all(&dir);
+        dir.join("secrets").join("identity_user1")
+    }
+
+    #[test]
+    fn round_trips_secret() {
+        let path = sandbox("round-trip");
+        assert_eq!(read_secret_path(&path).unwrap(), None);
+        write_secret_path(&path, Some("hunter2".to_string())).unwrap();
+        assert_eq!(read_secret_path(&path).unwrap(), Some("hunter2".to_string()));
+        write_secret_path(&path, Some("rotated".to_string())).unwrap();
+        assert_eq!(read_secret_path(&path).unwrap(), Some("rotated".to_string()));
+        write_secret_path(&path, None).unwrap();
+        assert_eq!(read_secret_path(&path).unwrap(), None);
+        write_secret_path(&path, Some(String::new())).unwrap();
+        assert_eq!(read_secret_path(&path).unwrap(), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn locks_down_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = sandbox("permissions");
+        write_secret_path(&path, Some("value".to_string())).unwrap();
+        let file = fs::metadata(&path).unwrap().permissions().mode();
+        let dir = fs::metadata(path.parent().unwrap()).unwrap().permissions().mode();
+        assert_eq!(file & 0o777, 0o600);
+        assert_eq!(dir & 0o777, 0o700);
+    }
 }

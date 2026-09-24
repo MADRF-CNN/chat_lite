@@ -2,9 +2,11 @@
 
 一款面向小团队的 macOS 桌面聊天应用，支持邀请码注册、私聊、群聊、未读消息以及图片发送。
 
-生产模式会强制所有 REST、WebSocket 和图片请求使用 TLS（HTTPS/WSS），Nginx 仅开放 TLS 1.2/1.3 并发送 HSTS。在此基础上，新版客户端还会对消息内容和图片执行端到端加密：每个账号的 RSA-OAEP 私钥仅保存在本机 macOS Keychain，会话内容使用 AES-256-GCM 加密，服务器只保存会话密钥信封、密文和必要的路由元数据。
+生产模式会强制所有 REST、WebSocket 和图片请求使用 TLS（HTTPS/WSS），Nginx 仅开放 TLS 1.2/1.3 并发送 HSTS。在此基础上，新版客户端还会对消息内容和图片执行端到端加密：每个账号的 RSA-OAEP 私钥仅保存在本机（桌面端位于 `~/Library/Application Support/com.chatlite.desktop/secrets`，命令行客户端位于 `~/.config/chat-lite`，目录 0700、文件 0600），会话内容使用 AES-256-GCM 加密，服务器只保存会话密钥信封、密文和必要的路由元数据。
 
-首版端到端加密采用单设备模型。更换设备或丢失 Keychain 后无法恢复旧加密消息；新设备会创建新的身份密钥。服务器仍可看到账号、会话成员、发送时间、消息及图片密文大小等元数据。升级前已经发送的明文历史消息仍可读取，但服务器拒绝新版上线后的任何新增明文消息和图片。
+私钥文件只受文件权限保护：同一账号下的其他进程可以读取。需要更强隔离时应改用系统钥匙串或磁盘加密（FileVault）。
+
+首版端到端加密采用单设备模型。更换设备或删除本机密钥文件后无法恢复旧加密消息；新设备会创建新的身份密钥。服务器仍可看到账号、会话成员、发送时间、消息及图片密文大小等元数据。升级前已经发送的明文历史消息仍可读取，但服务器拒绝新版上线后的任何新增明文消息和图片。
 
 会话中的每位成员都必须至少登录一次 0.2.0 或更高版本，以注册自己的加密公钥；在此之前，其他成员无法向该会话发送新的加密消息。
 
@@ -30,6 +32,33 @@ pnpm dev
 ```
 
 最后一条命令会启动 API 和 Tauri 桌面客户端。邀请码命令的参数分别是最大使用次数和有效天数。
+
+## 命令行客户端（CLI）
+
+`apps/cli` 是与桌面端共用同一套服务端和端到端加密协议的终端客户端，适合在服务器或 SSH 会话中收发消息。
+
+```bash
+pnpm cli -- help
+pnpm cli -- login --server https://chat.example.com
+pnpm cli -- register --invite <邀请码>            # 密码省略时交互输入
+pnpm cli -- list
+pnpm cli -- send <用户名或会话 ID> "你好"
+pnpm cli -- watch --read
+```
+
+命令包括 `login`、`register`、`logout`、`whoami`、`list`、`search`、`open`、`group`、`send`、`history`、`read`、`download` 和 `watch`，`pnpm cli -- help <命令>` 可查看单个命令用法。会话参数可以是会话 ID（支持前缀）、私聊对方的用户名或群名；`history --ids` 配合 `download` 可把加密图片解密到本地。
+
+由于首版端到端加密是单设备模型，**CLI 请使用独立账号**：服务端每个账号只保存一把身份公钥，CLI 与桌面端登录同一账号会互相覆盖公钥，导致对方无法解密之后轮换的会话密钥。会话密钥由发送方在成员公钥齐备时生成，因此对方需要至少登录过一次 0.2.0 或更高版本客户端（含 CLI）。
+
+登录令牌与身份私钥保存在 `~/.config/chat-lite`（目录 0700、文件 0600），可用 `CHAT_LITE_HOME` 指定其他位置；CLI 不使用 macOS 钥匙串，请确保该目录所在磁盘已加密。`logout` 只清除登录令牌并保留身份私钥（保留账号的加密身份），`logout --forget-identity` 会连同私钥一起删除。
+
+服务器地址依次取自 `--server`、`CHAT_LITE_API_URL` 和上次登录保存的地址。自签证书部署时用 `--ca <证书路径>` 指定根证书，登录成功后会记住该路径，后续命令无需重复传入：
+
+```bash
+pnpm cli -- login --server https://<服务器 IP> --ca ./chat-lite-private-ca.crt
+```
+
+也可以全局设置 `export NODE_EXTRA_CA_CERTS=./chat-lite-private-ca.crt`（注意 `sudo` 下 Node 会忽略该变量）；使用受信任 CA 签发的域名证书时无需任何额外配置。
 
 ## 公网部署
 

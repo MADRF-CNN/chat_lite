@@ -11,6 +11,7 @@
     "lint": "pnpm -r lint",
     "db:generate": "pnpm --filter @chat-lite/server prisma:generate",
     "db:migrate": "pnpm --filter @chat-lite/server prisma:migrate",
-    "invite:create": "pnpm --filter @chat-lite/server invite:create"
+    "invite:create": "pnpm --filter @chat-lite/server invite:create",
+    "cli": "pnpm --filter @chat-lite/cli dev"
   }
 }

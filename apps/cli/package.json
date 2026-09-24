@@ -1,0 +1,26 @@
+{
+  "name": "@chat-lite/cli",
+  "version": "0.1.0",
+  "description": "Chat Lite command line client",
+  "private": true,
+  "bin": {
+    "chat-lite": "dist/index.js"
+  },
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "test": "tsx --test src/*.spec.ts"
+  },
+  "dependencies": {
+    "@chat-lite/shared": "workspace:*",
+    "socket.io-client": "^4.8.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.5.2",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  }
+}

@@ -8,6 +8,25 @@ importers:
 
   .: {}
 
+  apps/cli:
+    dependencies:
+      '@chat-lite/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
+      socket.io-client:
+        specifier: ^4.8.1
+        version: 4.8.3(supports-color@8.1.1)
+    devDependencies:
+      '@types/node':
+        specifier: ^24.5.2
+        version: 24.13.6
+      tsx:
+        specifier: ^4.20.5
+        version: 4.23.15
+      typescript:
+        specifier: ^5.9.2
+        version: 5.9.3
+
   apps/desktop:
     dependencies:
       '@chat-lite/shared':
