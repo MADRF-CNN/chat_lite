@@ -321,12 +321,15 @@ const watchCommand: Command = {
 };
 
 const chatCommand: Command = {
-  usage: "chat-lite [chat] [--server <地址>]",
-  summary: "进入交互式即时聊天终端 (支持 / 指令与实时收发)",
+  usage: "chat-lite [chat] [--mask|-m] [--server <地址>]",
+  summary: "进入交互式即时聊天终端 (支持 / 指令与实时收发，--mask 可直接伪装启动)",
   async run(args) {
-    const { values } = parseFlags(args, serverFlag);
+    const { values } = parseFlags(args, {
+      ...serverFlag,
+      mask: { type: "boolean", short: "m" },
+    });
     const client = await restore(values);
-    await runRepl(client);
+    await runRepl(client, { initialMasked: Boolean(values.mask) });
   },
 };
 

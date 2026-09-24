@@ -12,15 +12,26 @@ import { c } from "./color";
 const SLASH_COMMANDS = [
   "/help",
   "/switch",
+  "/s",
   "/list",
+  "/ls",
   "/history",
+  "/h",
   "/open",
   "/group",
   "/whoami",
   "/clear",
+  "/c",
   "/mask",
+  "/mk",
+  "/m",
+  "/boss",
   "/unmask",
+  "/umk",
+  "/um",
+  "/chat",
   "/quit",
+  "/q",
 ];
 
 function printBorder(title?: string) {
@@ -145,7 +156,7 @@ ORDER BY 1 DESC;
   console.log("");
 }
 
-export async function runRepl(client: Client) {
+export async function runRepl(client: Client, options?: { initialMasked?: boolean }) {
   let conversations = await client.listConversations();
   if (!conversations.length) {
     info("当前暂无任何会话。输入 /open <用户名> 发起私聊，或输入 /group <群名> <用户名...> 创建群聊。");
@@ -156,16 +167,16 @@ export async function runRepl(client: Client) {
   for (const item of conversations) conversationMap.set(item.id, item);
   const localClientIds = new Set<string>();
 
-  let isMasked = false;
+  let isMasked = Boolean(options?.initialMasked);
   let maskedUnreadCount = 0;
 
   function printMaskedHeader() {
-    console.clear();
+    process.stdout.write("\x1b[2J\x1b[3J\x1b[H");
     console.log(c.bold(c.brightWhite("OpenAI Codex (v0.14.2) [Interactive Shell]")));
     console.log(c.dim(`Workspace: ${process.cwd()}`));
     console.log(c.dim("Model: codex-davinci-002-optimized | Context: 8k tokens | Mode: Code Synthesis"));
     console.log(c.gray("-".repeat(70)));
-    console.log(c.dim("Type instructions or code prompt. Type /unmask or exit to resume."));
+    console.log(c.dim("Type instructions or code prompt. Type /umk or exit to resume."));
     console.log("");
   }
 
@@ -181,7 +192,7 @@ export async function runRepl(client: Client) {
   }
 
   function printHeader() {
-    console.clear();
+    process.stdout.write("\x1b[2J\x1b[3J\x1b[H");
     printBorder("Chat Lite 命令行客户端 [E2EE]");
     printBoxLine("当前用户:", `${c.bold(c.brightWhite(client.user.displayName))} ${c.gray(`(@${client.user.username})`)}`);
     if (activeConversation) {
@@ -227,10 +238,14 @@ export async function runRepl(client: Client) {
     }
   }
 
-  printHeader();
-  if (activeConversation) {
-    printSectionHeader("最近消息");
-    await showHistory(activeConversation, 10);
+  if (isMasked) {
+    printMaskedHeader();
+  } else {
+    printHeader();
+    if (activeConversation) {
+      printSectionHeader("最近消息");
+      await showHistory(activeConversation, 10);
+    }
   }
 
   // Socket.io for live background updates
@@ -355,8 +370,8 @@ export async function runRepl(client: Client) {
           console.log(`  ${c.bold(c.brightYellow("/open"))}    ${c.cyan("<用户名>")}      ${c.gray(" ".repeat(14))} 发起或进入私聊`);
           console.log(`  ${c.bold(c.brightYellow("/group"))}   ${c.cyan("<群名> <成员>")}   ${c.gray(" ".repeat(10))} 创建新群聊`);
           console.log(`  ${c.bold(c.brightYellow("/whoami"))}  ${c.gray(" ".repeat(13))}   ${c.gray(" ".repeat(14))} 查看当前账号与加密状态`);
-          console.log(`  ${c.bold(c.brightYellow("/mask"))}    ${c.gray(" ".repeat(13))}   ${c.gray("(伪装模式)")}   切换到 Codex 代码伪装掩护`);
-          console.log(`  ${c.bold(c.brightYellow("/unmask"))}  ${c.gray(" ".repeat(13))}   ${c.gray("(解除伪装)")}   退出掩护恢复聊天 (简写: /chat)`);
+          console.log(`  ${c.bold(c.brightYellow("/mask"))}    ${c.gray(" ".repeat(13))}   ${c.gray("(简写: /mk, /m)")} 切换到 Codex 代码伪装掩护`);
+          console.log(`  ${c.bold(c.brightYellow("/unmask"))}  ${c.gray(" ".repeat(13))}   ${c.gray("(简写: /umk, /um)")} 退出掩护恢复聊天 (亦可输入 exit)`);
           console.log(`  ${c.bold(c.brightYellow("/clear"))}   ${c.gray(" ".repeat(13))}   ${c.gray("(简写: /c)")}   清屏并刷新当前会话`);
           console.log(`  ${c.bold(c.brightYellow("/quit"))}    ${c.gray(" ".repeat(13))}   ${c.gray("(简写: /q)")}   退出交互会话`);
           printBorder();
@@ -364,6 +379,8 @@ export async function runRepl(client: Client) {
           break;
 
         case "mask":
+        case "mk":
+        case "m":
         case "stealth":
         case "boss":
           isMasked = true;
@@ -373,6 +390,8 @@ export async function runRepl(client: Client) {
           break;
 
         case "unmask":
+        case "umk":
+        case "um":
         case "chat":
           isMasked = false;
           printHeader();
@@ -546,7 +565,8 @@ export async function runRepl(client: Client) {
 
     // If in masked mode, simulate Codex response instead of sending chat message!
     if (isMasked) {
-      if (line.toLowerCase() === "exit" || line.toLowerCase() === "quit" || line.toLowerCase() === "unmask") {
+      const lower = line.toLowerCase();
+      if (["exit", "quit", "q", "unmask", "umk", "um", "chat", ":q"].includes(lower)) {
         isMasked = false;
         printHeader();
         if (activeConversation) {
