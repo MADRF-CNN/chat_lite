@@ -35,30 +35,43 @@ pnpm dev
 
 ## 命令行客户端（CLI）
 
-`apps/cli` 是与桌面端共用同一套服务端和端到端加密协议的终端客户端，适合在服务器或 SSH 会话中收发消息。
+`apps/cli` 是与桌面端共用同一套服务端和端到端加密协议的终端客户端。支持**类似 Codex 的全屏即时交互聊天终端（REPL）**，同时也支持单命令脚本调用。
+
+详细安装与使用文档请参见 [CLI 使用指南](apps/cli/README.md)。
+
+### 交互终端模式（推荐）
 
 ```bash
-pnpm cli -- help
-pnpm cli -- login --server https://chat.example.com
-pnpm cli -- register --invite <邀请码>            # 密码省略时交互输入
-pnpm cli -- list
-pnpm cli -- send <用户名或会话 ID> "你好"
-pnpm cli -- watch --read
+# 1. 登录服务器（可直接填 IP，自动补全 HTTPS 并加载私有 CA）
+chat-lite login --server 101.34.254.65
+
+# 2. 启动全屏即时交互聊天终端
+chat-lite
 ```
 
-命令包括 `login`、`register`、`logout`、`whoami`、`list`、`search`、`open`、`group`、`send`、`history`、`read`、`download` 和 `watch`，`pnpm cli -- help <命令>` 可查看单个命令用法。会话参数可以是会话 ID（支持前缀）、私聊对方的用户名或群名；`history --ids` 配合 `download` 可把加密图片解密到本地。
+在交互终端中打字回车即发，支持 Tab 补全的快捷斜杠指令：
+- `/switch <名称|ID>` 或 `/s`：快速切换会话
+- `/list` 或 `/ls`：查看会话列表与未读数
+- `/history [条数]` 或 `/h`：翻阅历史加密消息
+- `/mask` 或 `/boss`：**伪装模式**，一键隐藏聊天并模拟为 OpenAI Codex 代码终端，收到新消息自动转为静默遥测日志；输入 `exit` 或 `/unmask` 恢复
+- `/clear` 或 `/c`：清屏并重绘会话
+- `/quit` 或 `/q`：退出终端
 
-由于首版端到端加密是单设备模型，**CLI 请使用独立账号**：服务端每个账号只保存一把身份公钥，CLI 与桌面端登录同一账号会互相覆盖公钥，导致对方无法解密之后轮换的会话密钥。会话密钥由发送方在成员公钥齐备时生成，因此对方需要至少登录过一次 0.2.0 或更高版本客户端（含 CLI）。
-
-登录令牌与身份私钥保存在 `~/.config/chat-lite`（目录 0700、文件 0600），可用 `CHAT_LITE_HOME` 指定其他位置；CLI 不使用 macOS 钥匙串，请确保该目录所在磁盘已加密。`logout` 只清除登录令牌并保留身份私钥（保留账号的加密身份），`logout --forget-identity` 会连同私钥一起删除。
-
-服务器地址依次取自 `--server`、`CHAT_LITE_API_URL` 和上次登录保存的地址。自签证书部署时用 `--ca <证书路径>` 指定根证书，登录成功后会记住该路径，后续命令无需重复传入：
+### 单命令与脚本模式
 
 ```bash
-pnpm cli -- login --server https://<服务器 IP> --ca ./chat-lite-private-ca.crt
+chat-lite list
+chat-lite send <用户名或会话 ID> "你好"
+chat-lite watch --read
+chat-lite history <用户名或会话 ID> --limit 50
 ```
 
-也可以全局设置 `export NODE_EXTRA_CA_CERTS=./chat-lite-private-ca.crt`（注意 `sudo` 下 Node 会忽略该变量）；使用受信任 CA 签发的域名证书时无需任何额外配置。
+### 端到端加密与密钥
+
+- **跨客户端智能密钥同步**：首次在 macOS 终端登录与桌面端相同的账号时，CLI 会自动识别并同步本机桌面端已有的身份私钥（位于 `~/Library/Application Support/com.chatlite.desktop/secrets`），无需手动复制密钥，两者无缝共用同一加密身份。
+- 若在未安装桌面端的纯服务器/SSH 机器上使用，CLI 会自动生成独立的端到端身份密钥。
+- 登录凭据与私钥保存在 `~/.config/chat-lite`（目录 0700、文件 0600），可通过环境变量 `CHAT_LITE_HOME` 自定义目录。
+- 自签证书部署支持自动从根目录或 `--ca <证书路径>` 导入信任，登录成功后会自动记忆配置。
 
 ## 公网部署
 
