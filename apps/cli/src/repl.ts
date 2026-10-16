@@ -176,7 +176,7 @@ export async function runRepl(client: Client, options?: { initialMasked?: boolea
     console.log(c.dim(`Workspace: ${process.cwd()}`));
     console.log(c.dim("Model: codex-davinci-002-optimized | Context: 8k tokens | Mode: Code Synthesis"));
     console.log(c.gray("-".repeat(70)));
-    console.log(c.dim("Type instructions or code prompt. Type /umk or exit to resume."));
+    console.log(c.dim("Type instructions or code prompt."));
     console.log("");
   }
 
@@ -204,7 +204,7 @@ export async function runRepl(client: Client, options?: { initialMasked?: boolea
     } else {
       printBoxLine("当前会话:", c.gray("无活跃会话 (输入 /list 查看，或 /open <用户名> 发起)"));
     }
-    console.log(c.blue("| ") + c.gray("提示: 直接打字发送消息; 输入 /help 查看指令; 输入 /q 退出"));
+    console.log(c.blue("| ") + c.gray("提示: 直接打字发送; 敲 m 回车或按两次Esc / Ctrl+B 极速伪装; /help 查看指令; /q 退出"));
     printBorder();
     console.log("");
   }
@@ -345,11 +345,143 @@ export async function runRepl(client: Client, options?: { initialMasked?: boolea
     for (const item of conversations) conversationMap.set(item.id, item);
   });
 
+  function enterMaskMode() {
+    isMasked = true;
+    maskedUnreadCount = 0;
+    printMaskedHeader();
+    rl.setPrompt(getPrompt());
+  }
+
+  async function exitMaskMode() {
+    isMasked = false;
+    printHeader();
+    if (activeConversation) {
+      printSectionHeader("最近消息");
+      await showHistory(activeConversation, 10);
+    }
+    if (maskedUnreadCount > 0) {
+      console.log(c.bold(c.brightYellow(`[* 掩护期间收到 ${maskedUnreadCount} 条新消息]`)));
+      maskedUnreadCount = 0;
+    }
+    rl.setPrompt(getPrompt());
+  }
+
+  // Hotkey listener for instant mask toggle (Double Esc or Ctrl+B)
+  let isToggling = false;
+  let lastEscTime = 0;
+  let lastToggleTime = 0;
+  const ESC_DOUBLE_PRESS_INTERVAL = 700;
+  const TOGGLE_COOLDOWN = 600;
+
+  async function performMaskToggle() {
+    isToggling = true;
+    lastToggleTime = Date.now();
+    try {
+      const mutableRl = rl as unknown as { line: string; cursor: number };
+      mutableRl.line = "";
+      mutableRl.cursor = 0;
+      if (!isMasked) {
+        enterMaskMode();
+      } else {
+        await exitMaskMode();
+      }
+      rl.prompt();
+    } finally {
+      isToggling = false;
+    }
+  }
+
+  // 1. Raw stdin listener: detects Esc with 0ms delay without waiting for Node's 500ms escape sequence timeout
+  const onRawData = async (chunk: Buffer | string) => {
+    if (isToggling) return;
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    const now = Date.now();
+    if (now - lastToggleTime < TOGGLE_COOLDOWN) return;
+
+    // Fast double Esc in a single chunk: [0x1b, 0x1b]
+    if (buf.length === 2 && buf[0] === 0x1b && buf[1] === 0x1b) {
+      lastEscTime = 0;
+      await performMaskToggle();
+      return;
+    }
+
+    // Single Esc byte: [0x1b]
+    if (buf.length === 1 && buf[0] === 0x1b) {
+      if (now - lastEscTime <= ESC_DOUBLE_PRESS_INTERVAL) {
+        lastEscTime = 0;
+        await performMaskToggle();
+      } else {
+        lastEscTime = now;
+      }
+      return;
+    }
+
+    // Any other key clears lastEscTime so arrow keys or typing don't count towards double-Esc
+    if (!buf.includes(0x1b)) {
+      lastEscTime = 0;
+    }
+  };
+
+  // 2. Keypress listener for Ctrl+B and fallback key.sequence === "\x1b\x1b"
+  const onKeypress = async (str: string, key?: { name?: string; ctrl?: boolean; sequence?: string }) => {
+    if (!key || isToggling) return;
+    const now = Date.now();
+    if (now - lastToggleTime < TOGGLE_COOLDOWN) return;
+
+    const isCtrlB = key.ctrl && (key.name === "b" || str === "\x02");
+    const isDoubleEscSeq = key.sequence === "\x1b\x1b";
+    const isEsc = key.name === "escape";
+
+    let triggered = false;
+    if (isCtrlB || isDoubleEscSeq) {
+      triggered = true;
+      lastEscTime = 0;
+    } else if (isEsc) {
+      if (now - lastEscTime <= ESC_DOUBLE_PRESS_INTERVAL) {
+        triggered = true;
+        lastEscTime = 0;
+      } else {
+        lastEscTime = now;
+      }
+    }
+
+    if (triggered) {
+      await performMaskToggle();
+    }
+  };
+
+  process.stdin.on("data", onRawData);
+  process.stdin.on("keypress", onKeypress);
+
   rl.prompt();
 
   rl.on("line", async (rawLine) => {
     const line = rawLine.trim();
     if (!line) {
+      rl.prompt();
+      return;
+    }
+
+    // In masked mode: only unmask triggers restore chat; everything else simulates Codex response!
+    if (isMasked) {
+      const lower = line.toLowerCase();
+      if (["exit", "quit", "q", "unmask", "umk", "um", "chat", ":q", "/unmask", "/umk", "/um", "/chat"].includes(lower)) {
+        eraseSubmittedLine(stripVTControlCharacters(getPrompt()), rawLine);
+        await exitMaskMode();
+        rl.prompt();
+        return;
+      }
+
+      simulateCodexOutput(line);
+      rl.prompt();
+      return;
+    }
+
+    // Direct fast mask triggers (m, mk, mask, boss) without requiring slash /
+    const lower = line.toLowerCase();
+    if (lower === "m" || lower === "mk" || lower === "mask" || lower === "boss") {
+      eraseSubmittedLine(stripVTControlCharacters(getPrompt()), rawLine);
+      enterMaskMode();
       rl.prompt();
       return;
     }
@@ -370,8 +502,8 @@ export async function runRepl(client: Client, options?: { initialMasked?: boolea
           console.log(`  ${c.bold(c.brightYellow("/open"))}    ${c.cyan("<用户名>")}      ${c.gray(" ".repeat(14))} 发起或进入私聊`);
           console.log(`  ${c.bold(c.brightYellow("/group"))}   ${c.cyan("<群名> <成员>")}   ${c.gray(" ".repeat(10))} 创建新群聊`);
           console.log(`  ${c.bold(c.brightYellow("/whoami"))}  ${c.gray(" ".repeat(13))}   ${c.gray(" ".repeat(14))} 查看当前账号与加密状态`);
-          console.log(`  ${c.bold(c.brightYellow("/mask"))}    ${c.gray(" ".repeat(13))}   ${c.gray("(简写: /mk, /m)")} 切换到 Codex 代码伪装掩护`);
-          console.log(`  ${c.bold(c.brightYellow("/unmask"))}  ${c.gray(" ".repeat(13))}   ${c.gray("(简写: /umk, /um)")} 退出掩护恢复聊天 (亦可输入 exit)`);
+          console.log(`  ${c.bold(c.brightYellow("/mask"))}    ${c.gray(" ".repeat(13))}   ${c.gray("(简写: /mk, /m; 或直接敲 m 回车 / 连按两次Esc / Ctrl+B)")} 极速切换到 Codex 伪装`);
+          console.log(`  ${c.bold(c.brightYellow("/unmask"))}  ${c.gray(" ".repeat(13))}   ${c.gray("(简写: /umk, /um; 亦可按两次Esc / Ctrl+B 或输入 exit)")} 退出掩护恢复聊天`);
           console.log(`  ${c.bold(c.brightYellow("/clear"))}   ${c.gray(" ".repeat(13))}   ${c.gray("(简写: /c)")}   清屏并刷新当前会话`);
           console.log(`  ${c.bold(c.brightYellow("/quit"))}    ${c.gray(" ".repeat(13))}   ${c.gray("(简写: /q)")}   退出交互会话`);
           printBorder();
@@ -383,27 +515,14 @@ export async function runRepl(client: Client, options?: { initialMasked?: boolea
         case "m":
         case "stealth":
         case "boss":
-          isMasked = true;
-          maskedUnreadCount = 0;
-          printMaskedHeader();
-          rl.setPrompt(getPrompt());
+          enterMaskMode();
           break;
 
         case "unmask":
         case "umk":
         case "um":
         case "chat":
-          isMasked = false;
-          printHeader();
-          if (activeConversation) {
-            printSectionHeader("最近消息");
-            await showHistory(activeConversation, 10);
-          }
-          if (maskedUnreadCount > 0) {
-            console.log(c.bold(c.brightYellow(`[* 掩护期间收到 ${maskedUnreadCount} 条新消息]`)));
-            maskedUnreadCount = 0;
-          }
-          rl.setPrompt(getPrompt());
+          await exitMaskMode();
           break;
 
         case "list":
@@ -563,30 +682,6 @@ export async function runRepl(client: Client, options?: { initialMasked?: boolea
       return;
     }
 
-    // If in masked mode, simulate Codex response instead of sending chat message!
-    if (isMasked) {
-      const lower = line.toLowerCase();
-      if (["exit", "quit", "q", "unmask", "umk", "um", "chat", ":q"].includes(lower)) {
-        isMasked = false;
-        printHeader();
-        if (activeConversation) {
-          printSectionHeader("最近消息");
-          await showHistory(activeConversation, 10);
-        }
-        if (maskedUnreadCount > 0) {
-          console.log(c.bold(c.brightYellow(`[* 掩护期间收到 ${maskedUnreadCount} 条新消息]`)));
-          maskedUnreadCount = 0;
-        }
-        rl.setPrompt(getPrompt());
-        rl.prompt();
-        return;
-      }
-
-      simulateCodexOutput(line);
-      rl.prompt();
-      return;
-    }
-
     // Normal message sending
     if (!activeConversation) {
       console.log(c.yellow("当前暂无活跃会话，请先输入 /list 或 /open <用户名> 选择会话"));
@@ -620,6 +715,8 @@ export async function runRepl(client: Client, options?: { initialMasked?: boolea
   });
 
   rl.on("close", () => {
+    process.stdin.off("data", onRawData);
+    process.stdin.off("keypress", onKeypress);
     socket.disconnect();
     console.log(`\n${c.gray("已退出 Chat Lite CLI。")}`);
     process.exit(0);

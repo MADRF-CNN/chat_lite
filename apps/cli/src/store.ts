@@ -25,9 +25,9 @@ function readJson<T>(path: string): T | null {
 
 function writeJson(path: string, value: unknown) {
   mkdirSync(configDir(), { recursive: true, mode: 0o700 });
-  chmodSync(configDir(), 0o700);
+  try { chmodSync(configDir(), 0o700); } catch {}
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
-  chmodSync(path, 0o600);
+  try { chmodSync(path, 0o600); } catch {}
 }
 
 export function readConfig() { return readJson<Config>(configPath()); }
@@ -53,6 +53,8 @@ export function findDesktopIdentity(userId: string): Identity | null {
     join(home, ".local", "share", "com.chatlite.desktop", "secrets", filename),
     join(home, ".config", "com.chatlite.desktop", "secrets", filename),
     join(home, "AppData", "Roaming", "com.chatlite.desktop", "secrets", filename),
+    join(home, "AppData", "Roaming", "com.chat-lite.desktop", "secrets", filename),
+    join(home, "AppData", "Roaming", "chat-lite", "secrets", filename),
   ];
   for (const candidate of candidates) {
     const data = readJson<Identity>(candidate);
