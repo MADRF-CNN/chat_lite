@@ -143,3 +143,37 @@ test("成员变化后重新生成密钥版本", async () => {
   const encrypted = await alice.encryptContent(conversationOf(["alice", "bob", "carol"]), { text: "第二版", attachments: [] });
   assert.equal(encrypted.keyVersion, 2);
 });
+
+test("加密图片附件后接收方可正确解密原图与缩略图", async () => {
+  const server = new FakeServer();
+  const aliceId = await server.createUser("alice");
+  const bobId = await server.createUser("bob");
+  server.createConversation("conv1", ["alice", "bob"]);
+  const conversation = conversationOf(["alice", "bob"]);
+
+  const blobs = new Map<string, Uint8Array>();
+  const alice = createE2ee(server.requestAs("alice"), async (path) => blobs.get(path)!, aliceId);
+  const bob = createE2ee(server.requestAs("bob"), async (path) => blobs.get(path)!, bobId);
+
+  const originalPlain = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]);
+  const thumbPlain = new Uint8Array([9, 10, 11, 12]);
+  const encAtt = await alice.encryptAttachment(conversation, originalPlain, thumbPlain);
+  blobs.set("/attachments/att1/original", encAtt.originalBytes);
+  blobs.set("/attachments/att1/thumbnail", encAtt.thumbnailBytes);
+
+  const metadata = {
+    id: "att1",
+    originalName: "demo.png",
+    mimeType: "image/png",
+    size: originalPlain.length,
+    width: 100,
+    height: 80,
+    originalNonce: encAtt.originalNonce,
+    thumbnailNonce: encAtt.thumbnailNonce,
+  };
+
+  const decOriginal = await bob.decryptAttachment(metadata, conversation, encAtt.keyVersion, "original");
+  const decThumb = await bob.decryptAttachment(metadata, conversation, encAtt.keyVersion, "thumbnail");
+  assert.deepEqual(decOriginal, originalPlain);
+  assert.deepEqual(decThumb, thumbPlain);
+});

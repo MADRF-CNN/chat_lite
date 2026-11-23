@@ -46,7 +46,9 @@ class Transport {
 
   async request<T>(path: string, init: RequestInit = {}, retry = true): Promise<T> {
     const headers = new Headers(init.headers);
-    if (init.body) headers.set("Content-Type", "application/json");
+    if (init.body && !(init.body instanceof FormData) && !headers.has("Content-Type")) {
+      headers.set("Content-Type", "application/json");
+    }
     if (this.accessToken) headers.set("Authorization", `Bearer ${this.accessToken}`);
     const response = await fetch(`${this.apiUrl}/api${path}`, { ...init, headers });
     if (response.status === 401 && retry && await this.refresh()) return this.request<T>(path, init, false);
@@ -54,8 +56,11 @@ class Transport {
     return response.json() as Promise<T>;
   }
 
-  async fetchBytes(path: string) {
-    const response = await fetch(`${this.apiUrl}/api${path}`, { headers: { Authorization: `Bearer ${this.accessToken}` } });
+  async fetchBytes(path: string, retry = true): Promise<Uint8Array> {
+    const response = await fetch(`${this.apiUrl}/api${path}`, {
+      headers: this.accessToken ? { Authorization: `Bearer ${this.accessToken}` } : undefined,
+    });
+    if (response.status === 401 && retry && await this.refresh()) return this.fetchBytes(path, false);
     if (!response.ok) throw new Error(await errorMessage(response));
     return new Uint8Array(await response.arrayBuffer());
   }
@@ -157,10 +162,28 @@ export class Client {
     return this.transport.request<{ items: MessageDto[]; nextCursor: string | null }>(`/conversations/${conversationId}/messages?${query}`);
   }
 
-  sendMessage(conversationId: string, ciphertext: string, nonce: string, keyVersion: number, clientId = randomUUID()) {
+  uploadEncryptedAttachment(original: Uint8Array, thumbnail: Uint8Array) {
+    const data = new FormData();
+    data.append("encrypted", "true");
+    data.append("file", new Blob([Buffer.from(original)], { type: "application/octet-stream" }), "encrypted.bin");
+    data.append("thumbnail", new Blob([Buffer.from(thumbnail)], { type: "application/octet-stream" }), "thumbnail.bin");
+    return this.transport.request<{ id: string; encrypted: boolean }>("/attachments", {
+      method: "POST",
+      body: data,
+    });
+  }
+
+  sendMessage(
+    conversationId: string,
+    ciphertext: string,
+    nonce: string,
+    keyVersion: number,
+    clientId = randomUUID(),
+    attachmentIds: string[] = [],
+  ) {
     return this.transport.request<MessageDto>(`/conversations/${conversationId}/messages`, {
       method: "POST",
-      body: JSON.stringify({ clientId, ciphertext, nonce, keyVersion, attachmentIds: [] }),
+      body: JSON.stringify({ clientId, ciphertext, nonce, keyVersion, attachmentIds }),
     });
   }
 

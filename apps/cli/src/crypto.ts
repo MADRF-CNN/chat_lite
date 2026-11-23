@@ -116,6 +116,28 @@ export function createE2ee(request: JsonRequest, fetchBytes: FetchBytes, identit
     }
   }
 
+  async function encryptAttachment(
+    conversation: ConversationDto,
+    original: Uint8Array,
+    thumbnail: Uint8Array,
+    keyVersion?: number,
+  ) {
+    const { key, version } = await conversationKey(conversation, keyVersion);
+    const originalNonce = webcrypto.getRandomValues(new Uint8Array(12));
+    const thumbnailNonce = webcrypto.getRandomValues(new Uint8Array(12));
+    const [originalCipher, thumbnailCipher] = await Promise.all([
+      webcrypto.subtle.encrypt({ name: "AES-GCM", iv: originalNonce }, key, exactBuffer(original)),
+      webcrypto.subtle.encrypt({ name: "AES-GCM", iv: thumbnailNonce }, key, exactBuffer(thumbnail)),
+    ]);
+    return {
+      originalBytes: new Uint8Array(originalCipher),
+      originalNonce: toBase64(originalNonce),
+      thumbnailBytes: new Uint8Array(thumbnailCipher),
+      thumbnailNonce: toBase64(thumbnailNonce),
+      keyVersion: version,
+    };
+  }
+
   async function decryptAttachment(attachment: EncryptedAttachmentMetadata, conversation: ConversationDto, keyVersion: number, variant: "original" | "thumbnail" = "original") {
     const encrypted = await fetchBytes(`/attachments/${attachment.id}/${variant}`);
     const { key } = await conversationKey(conversation, keyVersion);
@@ -124,5 +146,5 @@ export function createE2ee(request: JsonRequest, fetchBytes: FetchBytes, identit
     return new Uint8Array(plaintext);
   }
 
-  return { conversationKey, encryptContent, decryptMessage, decryptAttachment, publicKey: identity.publicKey };
+  return { conversationKey, encryptContent, decryptMessage, encryptAttachment, decryptAttachment, publicKey: identity.publicKey };
 }

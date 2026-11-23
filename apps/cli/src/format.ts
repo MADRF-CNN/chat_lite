@@ -28,11 +28,20 @@ export function conversationLine(conversation: ConversationDto, me: UserSummary,
   return `${c.gray(`[${shortId(conversation.id)}]`)} ${kind} ${c.bold(title)}${unread}${suffix}`;
 }
 
-function attachmentSummary(decrypted: DecryptedMessage) {
-  return (decrypted.content?.attachments ?? []).map((item) => c.cyan(`[图片 ${item.originalName} ${formatSize(item.size)}]`)).join(" ");
+function attachmentSummary(decrypted: DecryptedMessage, imageIndex?: (attachmentId: string) => number | undefined) {
+  return (decrypted.content?.attachments ?? []).map((item) => {
+    const idx = imageIndex?.(item.id);
+    const badge = idx !== undefined ? `${c.bold(c.brightCyan(`#${idx}`))} ` : "";
+    return `${c.cyan("[图片 ")}${badge}${c.cyan(`${item.originalName} ${formatSize(item.size)}]`)}`;
+  }).join(" ");
 }
 
-export function decryptedLine(decrypted: DecryptedMessage, me: UserSummary, showId = false) {
+export function decryptedLine(
+  decrypted: DecryptedMessage,
+  me: UserSummary,
+  showId = false,
+  imageIndex?: (attachmentId: string) => number | undefined,
+) {
   const own = decrypted.message.sender.id === me.id;
   const timeStr = c.gray(`[${formatTime(decrypted.message.createdAt)}]`);
   const nameStr = own
@@ -40,7 +49,7 @@ export function decryptedLine(decrypted: DecryptedMessage, me: UserSummary, show
     : c.bold(c.brightYellow(decrypted.message.sender.displayName));
   const idStr = showId ? c.gray(` (${shortId(decrypted.message.id)})`) : "";
   const bodyText = decrypted.message.text ? c.brightWhite(decrypted.message.text) : "";
-  const body = [bodyText, attachmentSummary(decrypted)].filter(Boolean).join(" ");
+  const body = [bodyText, attachmentSummary(decrypted, imageIndex)].filter(Boolean).join(" ");
   return `${timeStr} ${nameStr}${idStr}: ${body || c.gray("[空消息]")}`;
 }
 

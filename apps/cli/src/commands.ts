@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { basename, extname, join } from "node:path";
-import type { MessageDto } from "@chat-lite/shared";
+import type { EncryptedAttachmentMetadata, MessageDto } from "@chat-lite/shared";
 import type { DecryptedMessage } from "./crypto";
 import { Client, conversationLabel, defaultApiUrl } from "./client";
 import { conversationLine, decryptedLine, formatSize, previewOf, shortId } from "./format";
+import { prepareImageFileForUpload, prepareImageForUpload, readClipboardImage, type PreparedUploadImage } from "./image";
 import { flagBool, flagNumber, flagString, parseFlags, serverFlag, type Values } from "./args";
 import { fail, info, warn } from "./log";
 import { ask, askHidden } from "./prompt";
@@ -190,19 +191,75 @@ const group: Command = {
 };
 
 const send: Command = {
-  usage: "chat-lite send <会话> <文本> [--server <地址>]",
-  summary: "发送端到端加密消息，会话支持 ID 前缀、用户名或群名",
+  usage: "chat-lite send <会话> [文本] [--image <路径>] [--paste] [--server <地址>]",
+  summary: "发送端到端加密消息或图片（支持 --image 多次指定或 --paste 发剪贴板截图）",
   async run(args) {
-    const { values, positionals } = parseFlags(args, serverFlag);
+    const { values, positionals } = parseFlags(args, {
+      ...serverFlag,
+      image: { type: "string", short: "i", multiple: true },
+      paste: { type: "boolean", short: "p" },
+    });
     const [target, ...words] = positionals;
     const text = words.join(" ").trim();
-    if (!target || !text) fail("用法：chat-lite send <会话> <文本>");
+    const rawImages = values.image;
+    const imagePaths = Array.isArray(rawImages)
+      ? rawImages.filter((item): item is string => typeof item === "string")
+      : typeof rawImages === "string"
+        ? [rawImages]
+        : [];
+    const usePaste = flagBool(values, "paste");
+
+    if (!target || (!text && !imagePaths.length && !usePaste)) {
+      fail("用法：chat-lite send <会话> [文本] [--image <路径>] [--paste]");
+    }
     if (text.length > 4000) fail("消息不能超过 4000 个字符");
+    if (imagePaths.length + (usePaste ? 1 : 0) > 10) fail("单条消息最多发送 10 张图片");
+
+    const preparedImages: PreparedUploadImage[] = [];
+    for (const imgPath of imagePaths) {
+      preparedImages.push(await prepareImageFileForUpload(imgPath));
+    }
+    if (usePaste) {
+      const clip = await readClipboardImage();
+      preparedImages.push(await prepareImageForUpload(clip.bytes, clip.name));
+    }
+
     const client = await restore(values);
     const conversation = await client.resolveConversation(target);
-    const encrypted = await client.e2ee.encryptContent(conversation, { text, attachments: [] });
-    await client.sendMessage(conversation.id, encrypted.ciphertext, encrypted.nonce, encrypted.keyVersion);
-    info(`已发送 → ${conversationLabel(conversation, client.user)}`);
+
+    const attachments: EncryptedAttachmentMetadata[] = [];
+    let keyVersion: number | undefined;
+    for (const prepared of preparedImages) {
+      const encAtt = await client.e2ee.encryptAttachment(conversation, prepared.originalBytes, prepared.thumbnailBytes, keyVersion);
+      keyVersion = encAtt.keyVersion;
+      const uploaded = await client.uploadEncryptedAttachment(encAtt.originalBytes, encAtt.thumbnailBytes);
+      attachments.push({
+        id: uploaded.id,
+        originalName: prepared.originalName,
+        mimeType: prepared.mimeType,
+        size: prepared.size,
+        width: prepared.width,
+        height: prepared.height,
+        originalNonce: encAtt.originalNonce,
+        thumbnailNonce: encAtt.thumbnailNonce,
+      });
+    }
+
+    const encrypted = await client.e2ee.encryptContent(
+      conversation,
+      { text: text || undefined, attachments },
+      keyVersion,
+    );
+    await client.sendMessage(
+      conversation.id,
+      encrypted.ciphertext,
+      encrypted.nonce,
+      encrypted.keyVersion,
+      undefined,
+      attachments.map((item) => item.id),
+    );
+    const summary = attachments.length ? `（含 ${attachments.length} 张图片）` : "";
+    info(`已发送${summary} → ${conversationLabel(conversation, client.user)}`);
   },
 };
 
