@@ -293,7 +293,7 @@ const history: Command = {
       return;
     }
     for (const message of messages) {
-      info(decryptedLine(await client.e2ee.decryptMessage(message, conversation), client.user, flagBool(values, "ids")));
+      info(decryptedLine(await client.e2ee.decryptMessage(message, conversation), client.user, flagBool(values, "ids"), undefined, conversation));
     }
     if (flagBool(values, "read")) {
       const last = messages[messages.length - 1];

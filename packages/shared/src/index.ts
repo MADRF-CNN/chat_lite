@@ -25,9 +25,16 @@ export type EncryptedAttachmentMetadata = {
   thumbnailNonce: string;
 };
 
+export type QuotedMessageMetadata = {
+  id: string;
+  senderName: string;
+  preview: string;
+};
+
 export type EncryptedMessageContent = {
   text?: string;
   attachments: EncryptedAttachmentMetadata[];
+  replyTo?: QuotedMessageMetadata;
 };
 
 export type MessageDto = {
@@ -41,6 +48,7 @@ export type MessageDto = {
   createdAt: string;
   sender: UserSummary;
   attachments: AttachmentDto[];
+  replyTo?: QuotedMessageMetadata;
 };
 
 export type ConversationDto = {

@@ -37,10 +37,10 @@ export async function ensureNotificationPermission() {
   }
 }
 
-export async function notifyIncomingMessage(message: MessageDto, conversationName: string) {
+export async function notifyIncomingMessage(message: MessageDto, conversationName: string, mentioned = false) {
   if (!await ensureNotificationPermission()) return;
   sendNotification({
-    title: `${message.sender.displayName} · ${conversationName}`,
-    body: message.attachments.length ? "收到一条加密图片消息" : "收到一条加密消息",
+    title: mentioned ? `[有人@你] ${message.sender.displayName} · ${conversationName}` : `${message.sender.displayName} · ${conversationName}`,
+    body: mentioned ? "有人在群里 @ 了你" : message.attachments.length ? "收到一条加密图片消息" : "收到一条加密消息",
   });
 }

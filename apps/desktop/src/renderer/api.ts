@@ -1,4 +1,4 @@
-import type { AuthResponse } from "@chat-lite/shared";
+import type { AuthResponse, UserSummary } from "@chat-lite/shared";
 import { invoke } from "@tauri-apps/api/core";
 import { isLoopbackEndpoint, isSecureEndpoint } from "./transport";
 
@@ -28,6 +28,17 @@ export const desktopBridge = ("__TAURI_INTERNALS__" in window ? tauriBridge : wi
 };
 let accessToken: string | null = null;
 let refreshPromise: Promise<boolean> | null = null;
+const userListeners = new Set<(user: UserSummary) => void>();
+
+export function subscribeCurrentUser(listener: (user: UserSummary) => void) {
+  userListeners.add(listener);
+  return () => { userListeners.delete(listener); };
+}
+
+function notifyCurrentUser(user: UserSummary) {
+  localStorage.setItem("currentUser", JSON.stringify(user));
+  for (const listener of userListeners) listener(user);
+}
 
 export function assertSecureTransport(url: string) {
   if (!import.meta.env.PROD) return;
@@ -47,7 +58,7 @@ async function refreshSession() {
       const auth = await response.json() as AuthResponse;
       accessToken = auth.accessToken;
       await desktopBridge.saveRefreshToken(auth.refreshToken);
-      localStorage.setItem("currentUser", JSON.stringify(auth.user));
+      notifyCurrentUser(auth.user);
       return true;
     })().finally(() => { refreshPromise = null; });
   }
@@ -72,7 +83,7 @@ export async function authenticate(path: "login" | "register", body: object) {
   const auth = await api<AuthResponse>(`/auth/${path}`, { method: "POST", body: JSON.stringify(body) }, false);
   setAccessToken(auth.accessToken);
   await desktopBridge.saveRefreshToken(auth.refreshToken);
-  localStorage.setItem("currentUser", JSON.stringify(auth.user));
+  notifyCurrentUser(auth.user);
   return auth;
 }
 

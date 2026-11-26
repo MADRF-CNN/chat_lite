@@ -43,6 +43,7 @@ test("detectImageProtocol 正确识别 Ghostty / Kitty / iTerm2 / 半块降级",
   assert.equal(detectImageProtocol({ TERM_PROGRAM: "iTerm.app" }, true), "iterm2");
   assert.equal(detectImageProtocol({ TERM_PROGRAM: "WarpTerminal" }, true), "iterm2");
   assert.equal(detectImageProtocol({ TERM_PROGRAM: "Apple_Terminal", COLORTERM: "truecolor" }, true), "halfblock");
+  assert.equal(detectImageProtocol({ WT_SESSION: "1234-5678" }, true), "halfblock");
   assert.equal(detectImageProtocol({ TERM_PROGRAM: "Apple_Terminal", NO_COLOR: "1" }, true), "none");
   assert.equal(detectImageProtocol({ TERM_PROGRAM: "ghostty" }, false), "none");
   assert.equal(detectImageProtocol({ CHAT_LITE_IMAGE_PROTOCOL: "halfblock", TERM_PROGRAM: "ghostty" }, true), "halfblock");
@@ -129,6 +130,15 @@ test("parsePathAndCaption 支持引号、Ghostty 拖入转义空格与附带文�
     path: "~/Desktop/a.jpg",
     caption: "",
   });
+  assert.deepEqual(parsePathAndCaption('"C:\\Users\\alice\\Screen Shot.png" Windows 截图'), {
+    path: "C:\\Users\\alice\\Screen Shot.png",
+    caption: "Windows 截图",
+  });
+  assert.deepEqual(parsePathAndCaption("C:\\Users\\alice\\photo.jpg 说明"), {
+    path: "C:\\Users\\alice\\photo.jpg",
+    caption: "说明",
+  });
+  assert.equal(looksLikeImageFilePath("C:\\Users\\alice\\Desktop\\not-found.png"), true);
 });
 
 test("prepareImageForUpload 生成 WebP 缩略图并自动将 TIFF 转为 PNG", async () => {

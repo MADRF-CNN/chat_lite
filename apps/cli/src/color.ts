@@ -31,4 +31,9 @@ export const c = {
   brightMagenta: wrap("\x1b[95m", "\x1b[39m"),
   brightCyan: wrap("\x1b[96m", "\x1b[39m"),
   brightWhite: wrap("\x1b[97m", "\x1b[39m"),
+
+  // Badges / Highlights
+  mentionMe: wrap("\x1b[1;30;103m", "\x1b[0m"),
+  mentionOther: wrap("\x1b[1;96m", "\x1b[22;39m"),
+  alertBadge: wrap("\x1b[1;97;41m", "\x1b[0m"),
 };

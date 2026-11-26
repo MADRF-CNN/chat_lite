@@ -1,12 +1,14 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import type { ConversationDto, EncryptedAttachmentMetadata, MessageDto, UserSummary } from "@chat-lite/shared";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import type { ConversationDto, EncryptedAttachmentMetadata, MessageDto, QuotedMessageMetadata, UserSummary } from "@chat-lite/shared";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { ChevronsRight, ImagePlus, LogOut, MessageCircle, PanelLeftClose, PanelLeftOpen, Plus, Search, Send, Settings, Users } from "lucide-react";
+import { ChevronsRight, CornerUpLeft, ImagePlus, LogOut, MessageCircle, PanelLeftClose, PanelLeftOpen, Plus, Search, Send, Settings, Smile, Users, X } from "lucide-react";
 import { io, Socket } from "socket.io-client";
-import { api, API_URL, assertSecureTransport, authenticate, authenticatedImage, desktopBridge, getAccessToken, refreshSession, setAccessToken, SOCKET_URL } from "./api";
+import { api, API_URL, assertSecureTransport, authenticate, authenticatedImage, desktopBridge, getAccessToken, refreshSession, setAccessToken, SOCKET_URL, subscribeCurrentUser } from "./api";
 import { conversationTitle } from "./conversation";
 import { decryptImage, decryptMessage, encryptContent, encryptImage, ensureIdentity } from "./crypto";
+import { extractMentionQuery, findMentionSpans, isMentioningMe, type MentionCandidate } from "./mention";
 import { ensureNotificationPermission, isChatWindowFocused, notifyIncomingMessage, shouldNotifyIncoming } from "./notifications";
+import { encodePixelStickerMessage, formatMessagePreview, parseColonStickerShortcut, parsePixelStickerMessage, PIXEL_PALETTE, PIXEL_STICKERS, type PixelSticker } from "./pixel";
 import { applyStyle, loadSettings, saveSettings, STYLE_OPTIONS, type Settings as AppSettings } from "./settings";
 
 type AuthMode = "login" | "register";
@@ -20,6 +22,38 @@ function formatBytes(bytes: number) {
 
 function terminalTime(value: string) {
   return new Date(value).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+function PixelArtSvg({ sticker, size = 40 }: { sticker: PixelSticker; size?: number }) {
+  const rects: ReactNode[] = [];
+  for (let y = 0; y < sticker.grid.length; y += 1) {
+    const row = sticker.grid[y] ?? "";
+    for (let x = 0; x < row.length; x += 1) {
+      const ch = row[x]!;
+      const fill = ch !== "." ? PIXEL_PALETTE[ch] : undefined;
+      if (fill) rects.push(<rect key={`${x}-${y}`} x={x} y={y} width={1} height={1} fill={fill} />);
+    }
+  }
+  return <svg className="pixel-svg" width={size} height={size} viewBox="0 0 10 10" shapeRendering="crispEdges" role="img" aria-label={sticker.label}>{rects}</svg>;
+}
+
+function renderHighlightedText(text: string, me: UserSummary, conversation?: ConversationDto): ReactNode {
+  if (!conversation || conversation.type !== "GROUP" || !text.includes("@")) return text;
+  const spans = findMentionSpans(text, me, conversation.members);
+  if (!spans.length) return text;
+  const parts: ReactNode[] = [];
+  let cursor = 0;
+  for (const span of spans) {
+    if (span.start > cursor) parts.push(text.slice(cursor, span.start));
+    if (span.target === "me" || span.target === "all") {
+      parts.push(<mark key={span.start} className="mention mention-me">{span.raw}</mark>);
+    } else {
+      parts.push(<span key={span.start} className="mention mention-other">{span.raw}</span>);
+    }
+    cursor = span.end;
+  }
+  if (cursor < text.length) parts.push(text.slice(cursor));
+  return parts;
 }
 
 function WindowDragRegion() {
@@ -130,7 +164,7 @@ function SettingsDialog({ settings, onChange, onClose, me, apiUrl }: { settings:
 }
 
 function Workspace({ me, settings, onChangeSettings, onLogout }: { me: UserSummary; settings: AppSettings; onChangeSettings: (patch: Partial<AppSettings>) => void; onLogout: () => void }) {
-  const [conversations, setConversations] = useState<ConversationDto[]>([]); const [selectedId, setSelectedId] = useState<string>(); const [messages, setMessages] = useState<MessageDto[]>([]); const [nextCursor, setNextCursor] = useState<string | null>(null); const [text, setText] = useState(""); const [dialog, setDialog] = useState<SearchMode>(); const [settingsOpen, setSettingsOpen] = useState(false); const [groupSettings, setGroupSettings] = useState(false); const [error, setError] = useState(""); const [uploading, setUploading] = useState(false); const [sidebarCollapsed, setSidebarCollapsed] = useState(settings.collapseSidebar); const [edgeMode, setEdgeMode] = useState(false);  const socket = useRef<Socket | undefined>(undefined); const selectedIdRef = useRef<string | undefined>(undefined); const conversationsRef = useRef<ConversationDto[]>([]); const settingsRef = useRef(settings); const messagesRef = useRef<MessageDto[]>([]); const edgeModeRef = useRef(edgeMode); const fileInput = useRef<HTMLInputElement>(null); const messagesContainer = useRef<HTMLDivElement>(null); const bottomAnchor = useRef<HTMLDivElement>(null); const isUserScrolledUp = useRef(false); const isSwitchingConversation = useRef(false); const isAligningScroll = useRef(false); const alignTimerRef = useRef<number[]>([]);
+  const [conversations, setConversations] = useState<ConversationDto[]>([]); const [selectedId, setSelectedId] = useState<string>(); const [messages, setMessages] = useState<MessageDto[]>([]); const [nextCursor, setNextCursor] = useState<string | null>(null); const [text, setText] = useState(""); const [replyTarget, setReplyTarget] = useState<QuotedMessageMetadata | null>(null); const [stickerOpen, setStickerOpen] = useState(false); const [mentionMenu, setMentionMenu] = useState<{ start: number; end: number; candidates: MentionCandidate[]; activeIndex: number } | null>(null); const [dialog, setDialog] = useState<SearchMode>(); const [settingsOpen, setSettingsOpen] = useState(false); const [groupSettings, setGroupSettings] = useState(false); const [error, setError] = useState(""); const [uploading, setUploading] = useState(false); const [sidebarCollapsed, setSidebarCollapsed] = useState(settings.collapseSidebar); const [edgeMode, setEdgeMode] = useState(false);  const socket = useRef<Socket | undefined>(undefined); const selectedIdRef = useRef<string | undefined>(undefined); const conversationsRef = useRef<ConversationDto[]>([]); const settingsRef = useRef(settings); const messagesRef = useRef<MessageDto[]>([]); const edgeModeRef = useRef(edgeMode); const fileInput = useRef<HTMLInputElement>(null); const textareaRef = useRef<HTMLTextAreaElement>(null); const messagesContainer = useRef<HTMLDivElement>(null); const bottomAnchor = useRef<HTMLDivElement>(null); const isUserScrolledUp = useRef(false); const isSwitchingConversation = useRef(false); const isAligningScroll = useRef(false); const alignTimerRef = useRef<number[]>([]);
   messagesRef.current = messages;
   const [sidebarWidth, setSidebarWidth] = useState<number>(() => { try { const stored = localStorage.getItem("sidebarWidth"); return stored ? Math.max(160, Math.min(520, Number(stored))) : 218; } catch { return 218; } });
   const [composerHeight, setComposerHeight] = useState<number>(() => { try { const stored = localStorage.getItem("composerHeight"); return stored ? Math.max(56, Math.min(420, Number(stored))) : 92; } catch { return 92; } });
@@ -281,7 +315,8 @@ function Workspace({ me, settings, onChangeSettings, onLogout }: { me: UserSumma
             }
             if (viewingConversation) await api(`/conversations/${message.conversationId}/read`, { method: "POST", body: JSON.stringify({ messageId: message.id }) });
             if (settingsRef.current.notifications && conversation && shouldNotifyIncoming(message, { currentUserId: me.id, selectedConversationId: selectedIdRef.current, windowFocused: effectivelyFocused })) {
-              await notifyIncomingMessage(message, conversationTitle(conversation, me));
+              const mentioned = message.sender.id !== me.id && isMentioningMe(message.text, me, conversation);
+              await notifyIncomingMessage(message, conversationTitle(conversation, me), mentioned);
             }
             await loadConversations();
           })();
@@ -302,6 +337,9 @@ function Workspace({ me, settings, onChangeSettings, onLogout }: { me: UserSumma
     isSwitchingConversation.current = true;
     isUserScrolledUp.current = false;
     setMessages([]);
+    setReplyTarget(null);
+    setStickerOpen(false);
+    setMentionMenu(null);
     socket.current?.emit("conversation:join", selectedId);
     void api<{ items: MessageDto[]; nextCursor: string | null }>(`/conversations/${selectedId}/messages`).then(async ({ items, nextCursor: cursor }) => {
       const decrypted = await Promise.all(items.map((message) => decryptMessage(message, selected)));
@@ -361,22 +399,75 @@ function Workspace({ me, settings, onChangeSettings, onLogout }: { me: UserSumma
       if (el) el.scrollTop = prevTop + (el.scrollHeight - prevHeight);
     });
   }
-  async function send(attachments: EncryptedAttachmentMetadata[] = [], keyVersion?: number) {
-    if (!selectedId || !selected || (!text.trim() && !attachments.length)) return;
-    const outgoing = text;
+  function startReply(message: MessageDto) {
+    setReplyTarget({
+      id: message.id,
+      senderName: message.sender.displayName,
+      preview: formatMessagePreview(message.text, message.attachments.length, message.attachments[0]?.originalName),
+    });
+    requestAnimationFrame(() => textareaRef.current?.focus());
+  }
+  function updateMentionSuggestions(nextText: string, caretPos: number) {
+    const query = extractMentionQuery(nextText, caretPos, selected, me.id);
+    if (!query) {
+      setMentionMenu(null);
+      return;
+    }
+    setMentionMenu((current) => ({
+      ...query,
+      activeIndex: current ? Math.min(current.activeIndex, query.candidates.length - 1) : 0,
+    }));
+  }
+  function applyMentionCandidate(candidate: MentionCandidate) {
+    if (!mentionMenu) return;
+    const before = text.slice(0, mentionMenu.start);
+    const after = text.slice(mentionMenu.end);
+    const inserted = `@${candidate.token} `;
+    const nextText = `${before}${inserted}${after}`;
+    const nextCaret = before.length + inserted.length;
+    setText(nextText);
+    setMentionMenu(null);
+    requestAnimationFrame(() => {
+      const el = textareaRef.current;
+      if (el) {
+        el.focus();
+        el.setSelectionRange(nextCaret, nextCaret);
+      }
+    });
+  }
+  async function send(attachments: EncryptedAttachmentMetadata[] = [], keyVersion?: number, textOverride?: string) {
+    const rawOutgoing = textOverride !== undefined ? textOverride : text;
+    if (!selectedId || !selected || (!rawOutgoing.trim() && !attachments.length)) return;
+    const colonSticker = textOverride === undefined && !attachments.length ? parseColonStickerShortcut(rawOutgoing) : null;
+    const outgoing = colonSticker ? encodePixelStickerMessage(colonSticker.sticker, colonSticker.caption) : rawOutgoing;
     if (outgoing.length > 4000) { setError("消息不能超过 4000 个字符"); return; }
-    setText("");
+    const activeReply = replyTarget;
+    if (textOverride === undefined) setText("");
+    setReplyTarget(null);
+    setStickerOpen(false);
+    setMentionMenu(null);
     try {
-      const encrypted = await encryptContent(selected, { text: outgoing || undefined, attachments }, keyVersion);
+      const encrypted = await encryptContent(
+        selected,
+        { text: outgoing || undefined, attachments, ...(activeReply ? { replyTo: activeReply } : {}) },
+        keyVersion,
+      );
       const raw = await api<MessageDto>(`/conversations/${selectedId}/messages`, { method: "POST", body: JSON.stringify({ clientId: crypto.randomUUID(), ...encrypted, attachmentIds: attachments.map((item) => item.id) }) });
       const message = await decryptMessage(raw, selected);
       isUserScrolledUp.current = false;
       setMessages((items) => items.some((item) => item.id === message.id) ? items : [...items, message]);
       requestAnimationFrame(() => scrollToBottom(true));
     } catch (cause) {
-      setText(outgoing);
+      if (textOverride === undefined) setText(rawOutgoing);
+      if (activeReply) setReplyTarget(activeReply);
       setError(cause instanceof Error ? cause.message : "发送失败");
     }
+  }
+  async function sendPixelSticker(sticker: PixelSticker) {
+    const caption = text.trim();
+    const payload = encodePixelStickerMessage(sticker, caption);
+    setText("");
+    await send([], undefined, payload);
   }
   async function upload(file?: File) { if (!file || !selected || uploading) return; setUploading(true); try { const encrypted = await encryptImage(file, selected); await send([encrypted.metadata], encrypted.keyVersion); } catch (cause) { setError(cause instanceof Error ? cause.message : "图片上传失败"); } finally { setUploading(false); if (fileInput.current) fileInput.current.value = ""; } }
   function handlePaste(event: React.ClipboardEvent<HTMLTextAreaElement>) {
@@ -420,15 +511,20 @@ function Workspace({ me, settings, onChangeSettings, onLogout }: { me: UserSumma
         <div className="user-chip" title={`@${me.username}`}><span className="avatar compact">{me.displayName[0]}</span><strong>{me.displayName}</strong></div>
         <div className="toolbar"><button title="设置" onClick={() => setSettingsOpen(true)}><Settings size={15} /></button><button title="发起私聊" onClick={() => setDialog("direct")}><Plus size={15} /></button><button title="创建群聊" onClick={() => setDialog("group")}><Users size={15} /></button><button title="退出登录" onClick={() => void logout()}><LogOut size={15} /></button></div>
       </div>
-      <div className="conversation-list">{conversations.map((conversation) => <button key={conversation.id} className={conversation.id === selectedId ? "selected" : ""} onClick={() => { if (conversation.id === selectedId) { forceScrollToBottom(); } else { setSelectedId(conversation.id); } }}><span className="avatar">{conversation.type === "GROUP" ? <Users size={14} /> : conversationTitle(conversation, me)[0]}</span><span className="conversation-copy"><strong>{conversationTitle(conversation, me)}</strong><small>{conversation.lastMessage?.text ?? (conversation.lastMessage?.attachments.length ? "图片" : "")}</small></span>{conversation.unreadCount > 0 && <em>{conversation.unreadCount}</em>}</button>)}</div>
+      <div className="conversation-list">{conversations.map((conversation) => { const last = conversation.lastMessage; const lastPreview = last ? formatMessagePreview(last.text, last.attachments.length, last.attachments[0]?.originalName, 36) : ""; const mentionedUnread = conversation.unreadCount > 0 && conversation.type === "GROUP" && last && last.sender.id !== me.id && isMentioningMe(last.text, me, conversation); return <button key={conversation.id} className={conversation.id === selectedId ? "selected" : ""} onClick={() => { if (conversation.id === selectedId) { forceScrollToBottom(); } else { setSelectedId(conversation.id); } }}><span className="avatar">{conversation.type === "GROUP" ? <Users size={14} /> : conversationTitle(conversation, me)[0]}</span><span className="conversation-copy"><strong>{conversationTitle(conversation, me)}</strong><small>{mentionedUnread && <span className="sidebar-mention">[@你] </span>}{lastPreview}</small></span>{conversation.unreadCount > 0 && <em>{conversation.unreadCount}</em>}</button>; })}</div>
       {!sidebarCollapsed && <div className="sidebar-resizer" onMouseDown={startResizingSidebar} title="拖拽调整侧边栏宽度" />}
     </aside>
     <section className="chat-panel">{selected ? <>
       <header className="chat-header"><div className="chat-title"><button className="icon sidebar-toggle" aria-label={sidebarCollapsed ? "展开会话栏" : "收起会话栏"} title={sidebarCollapsed ? "展开会话栏" : "收起会话栏"} onClick={() => setSidebarCollapsed((value) => !value)}>{sidebarCollapsed ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={16} />}</button>{settings.style === "editor" && <div className="skin-tabs">{conversations.slice(0, 4).map((item, index) => <button key={item.id} className={`skin-tab ${item.id === selectedId ? "on" : ""}`} onClick={() => setSelectedId(item.id)}>{conversationTitle(item, me)}{[".log", ".md", ".txt"][index % 3] ?? ".log"}</button>)}</div>}<div><h2>{conversationTitle(selected, me)}</h2><small>{selected.type === "GROUP" ? `${selected.members.length} 位成员` : "私聊"} · 已加密</small></div></div><div className="header-actions">{selected.type === "GROUP" && <button className="icon" title="群聊设置" onClick={() => setGroupSettings(true)}><Settings size={16} /></button>}<button className="icon edge-collapse-button" aria-label="隐藏到屏幕右侧" title="隐藏到屏幕右侧（⌘⇧H）" onClick={() => void enterEdgeMode()}><ChevronsRight size={17} /></button></div></header>
       {settings.style === "table" && <div className="skin-table-head"><span>TIME</span><span>USER</span><span>STATE</span><span>MESSAGE</span></div>}
-      <div className="messages" ref={messagesContainer} onScroll={handleScroll}>{nextCursor && <button className="load-older" onClick={() => void loadOlder()}>加载更早消息</button>}{messages.map((message) => { const mine = message.sender.id === me.id; return <article key={message.id} className={`message ${mine ? "mine" : ""}`}><div className="log-prefix"><time>{terminalTime(message.createdAt)}</time><strong>{mine ? "我" : message.sender.username}</strong><span className="sep">&gt;</span><span className="state">OK</span></div><div className="log-content">{message.text && <p>{message.text}</p>}{message.attachments.map((attachment) => <ChatImage key={attachment.id} attachment={attachment} conversation={selected} keyVersion={message.keyVersion} onLoaded={() => { if (!isUserScrolledUp.current || isSwitchingConversation.current || isAligningScroll.current) scrollToBottom(false); }} />)}</div></article>; })}<div ref={bottomAnchor} style={{ height: 1, marginTop: -1, pointerEvents: "none" }} /></div>
+      <div className="messages" ref={messagesContainer} onScroll={handleScroll}>{nextCursor && <button className="load-older" onClick={() => void loadOlder()}>加载更早消息</button>}{messages.map((message) => { const mine = message.sender.id === me.id; const mentionedMe = !mine && selected.type === "GROUP" && isMentioningMe(message.text, me, selected); const pixelMsg = message.text ? parsePixelStickerMessage(message.text) : null; return <article key={message.id} className={`message ${mine ? "mine" : ""} ${mentionedMe ? "mentioned" : ""}`}><div className="log-prefix"><time>{terminalTime(message.createdAt)}</time><strong>{mine ? "我" : message.sender.displayName}</strong>{mentionedMe && <span className="mention-badge">@你</span>}<span className="sep">&gt;</span><span className="state">OK</span><button type="button" className="reply-btn" title="引用回复" onClick={() => startReply(message)}><CornerUpLeft size={12} /></button></div><div className="log-content">{pixelMsg ? <div className="pixel-msg"><PixelArtSvg sticker={pixelMsg.sticker} size={settings.style === "table" ? 22 : 40} />{pixelMsg.caption && <span className="pixel-caption">{renderHighlightedText(pixelMsg.caption, me, selected)}</span>}</div> : (message.text && <p>{renderHighlightedText(message.text, me, selected)}</p>)}{message.replyTo && <div className="quote-box"><span className="quote-author">└ 引用 {message.replyTo.senderName}:</span><span className="quote-preview">{message.replyTo.preview}</span></div>}{message.attachments.map((attachment) => <ChatImage key={attachment.id} attachment={attachment} conversation={selected} keyVersion={message.keyVersion} onLoaded={() => { if (!isUserScrolledUp.current || isSwitchingConversation.current || isAligningScroll.current) scrollToBottom(false); }} />)}</div></article>; })}<div ref={bottomAnchor} style={{ height: 1, marginTop: -1, pointerEvents: "none" }} /></div>
       <div className="composer-resizer" onMouseDown={startResizingComposer} title="拖拽调整输入框高度" />
-      <footer className="composer" onDrop={handleDrop} onDragOver={(e) => e.preventDefault()}><input ref={fileInput} hidden type="file" accept="image/jpeg,image/png,image/webp,image/gif" onChange={(e) => void upload(e.target.files?.[0])} /><button className="icon" title="发送图片" disabled={uploading} onClick={() => fileInput.current?.click()}><ImagePlus size={16} /></button><textarea aria-label="消息内容" placeholder={uploading ? "正在加密图片..." : "输入消息（可直接粘贴图片）"} value={text} onChange={(e) => setText(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void send(); } }} onPaste={handlePaste} onDrop={handleDrop} onDragOver={(e) => e.preventDefault()} /><button className="send" title="发送" disabled={!text.trim() || uploading} onClick={() => void send()}><Send size={15} /></button></footer>
+      <div className="composer-shell">
+        {mentionMenu && <div className="mention-popover" role="listbox">{mentionMenu.candidates.map((candidate, index) => <button key={candidate.token} type="button" className={index === mentionMenu.activeIndex ? "active" : ""} onMouseDown={(e) => { e.preventDefault(); applyMentionCandidate(candidate); }}><strong>{candidate.label}</strong><small>{candidate.sublabel}</small></button>)}</div>}
+        {stickerOpen && <div className="sticker-popover"><div className="sticker-head"><span>8-bit 像素表情</span><small>也可直接输入 :doge / :ok</small></div><div className="sticker-grid">{PIXEL_STICKERS.map((sticker) => <button key={sticker.id} type="button" title={`${sticker.label} (:${sticker.id})`} onClick={() => void sendPixelSticker(sticker)}><PixelArtSvg sticker={sticker} size={28} /><span>{sticker.label}</span></button>)}</div></div>}
+        {replyTarget && <div className="reply-bar"><span className="reply-bar-text"><strong>引用 {replyTarget.senderName}:</strong> {replyTarget.preview}</span><button type="button" className="icon reply-cancel" title="取消引用 (Esc)" onClick={() => setReplyTarget(null)}><X size={13} /></button></div>}
+        <footer className="composer" onDrop={handleDrop} onDragOver={(e) => e.preventDefault()}><input ref={fileInput} hidden type="file" accept="image/jpeg,image/png,image/webp,image/gif" onChange={(e) => void upload(e.target.files?.[0])} /><div className="composer-tools"><button type="button" className="icon" title="发送图片" disabled={uploading} onClick={() => fileInput.current?.click()}><ImagePlus size={16} /></button><button type="button" className={`icon ${stickerOpen ? "active" : ""}`} title="8-bit 像素表情" disabled={uploading} onClick={() => setStickerOpen((v) => !v)}><Smile size={16} /></button></div><textarea ref={textareaRef} aria-label="消息内容" placeholder={uploading ? "正在加密图片..." : selected.type === "GROUP" ? "输入消息（@ 提及成员 · :doge 发像素表情 · 可粘贴图片）" : "输入消息（:doge 发像素表情 · 可直接粘贴图片）"} value={text} onChange={(e) => { const next = e.target.value; setText(next); updateMentionSuggestions(next, e.target.selectionStart ?? next.length); }} onClick={(e) => updateMentionSuggestions(text, e.currentTarget.selectionStart ?? text.length)} onKeyDown={(e) => { if (mentionMenu) { if (e.key === "ArrowDown") { e.preventDefault(); setMentionMenu((m) => m ? { ...m, activeIndex: (m.activeIndex + 1) % m.candidates.length } : null); return; } if (e.key === "ArrowUp") { e.preventDefault(); setMentionMenu((m) => m ? { ...m, activeIndex: (m.activeIndex - 1 + m.candidates.length) % m.candidates.length } : null); return; } if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); const chosen = mentionMenu.candidates[mentionMenu.activeIndex]; if (chosen) applyMentionCandidate(chosen); return; } if (e.key === "Escape") { e.preventDefault(); setMentionMenu(null); return; } } if (e.key === "Escape") { if (stickerOpen) { setStickerOpen(false); return; } if (replyTarget) { setReplyTarget(null); return; } } if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void send(); } }} onPaste={handlePaste} onDrop={handleDrop} onDragOver={(e) => e.preventDefault()} /><button className="send" title="发送" disabled={!text.trim() || uploading} onClick={() => void send()}><Send size={15} /></button></footer>
+      </div>
     </> : <div className="empty-state"><button className="icon sidebar-toggle" title={sidebarCollapsed ? "展开会话栏" : "收起会话栏"} onClick={() => setSidebarCollapsed((value) => !value)}>{sidebarCollapsed ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={16} />}</button><p>选择会话</p><button className="icon edge-action" title="隐藏到屏幕右侧" onClick={() => void enterEdgeMode()}><ChevronsRight size={17} /></button></div>}</section>
     {error && <div className="toast" onClick={() => setError("")}><span>错误：</span>{error}</div>}
     {dialog && <SearchDialog mode={dialog} onClose={() => setDialog(undefined)} onDone={(id) => { setDialog(undefined); void loadConversations(id); }} />}
@@ -443,6 +539,7 @@ export function App() {
   const [settings, setSettings] = useState<AppSettings>(() => loadSettings());
   useEffect(() => { applyStyle(settings.style); }, [settings.style]);
   function changeSettings(patch: Partial<AppSettings>) { setSettings((current) => { const next = { ...current, ...patch }; saveSettings(next); return next; }); }
+  useEffect(() => subscribeCurrentUser(setMe), []);
   useEffect(() => { void refreshSession().then((ok) => { if (!ok) setMe(null); setBooting(false); }); }, []);
   if (booting) return <main className="splash"><WindowDragRegion /><span>Chat Lite</span><small>正在启动...</small></main>;
   return me ? <Workspace me={me} settings={settings} onChangeSettings={changeSettings} onLogout={() => setMe(null)} /> : <Login onAuthenticated={setMe} />;

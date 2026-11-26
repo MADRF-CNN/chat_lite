@@ -2,10 +2,23 @@ import readline from "node:readline";
 import { randomUUID } from "node:crypto";
 import { stripVTControlCharacters } from "node:util";
 import { io, type Socket } from "socket.io-client";
-import type { ClientToServerEvents, ConversationDto, EncryptedAttachmentMetadata, ServerToClientEvents } from "@chat-lite/shared";
+import type { ClientToServerEvents, ConversationDto, EncryptedAttachmentMetadata, QuotedMessageMetadata, ServerToClientEvents } from "@chat-lite/shared";
 import type { DecryptedMessage } from "./crypto";
 import { Client, conversationLabel } from "./client";
-import { decryptedLine, formatSize, formatTime, shortId } from "./format";
+import {
+  PIXEL_STICKERS,
+  allStickerCompletionKeys,
+  completeColonSticker,
+  encodePixelStickerMessage,
+  parseColonStickerShortcut,
+  parsePixelStickerMessage,
+  renderPixelSticker,
+  renderPixelStickerLines,
+  resolvePixelSticker,
+  type PixelSticker,
+} from "./pixel";
+import { completeGroupMention, highlightMentions, isMentioningMe } from "./mention";
+import { decryptedLine, formatQuoteBlock, formatSize, formatTime, parseQuickQuoteShortcut, quotePreviewOf, shortId } from "./format";
 import {
   PreviewManager,
   clearTerminalImages,
@@ -27,6 +40,12 @@ import { c } from "./color";
 
 const SLASH_COMMANDS = [
   "/help",
+  "/reply",
+  "/r",
+  "/quote",
+  "/emo",
+  "/e",
+  "/art",
   "/img",
   "/i",
   "/view",
@@ -42,6 +61,8 @@ const SLASH_COMMANDS = [
   "/ls",
   "/history",
   "/h",
+  "/more",
+  "/mo",
   "/open",
   "/group",
   "/whoami",
@@ -89,6 +110,7 @@ function visualWidth(text: string): number {
   for (const char of text) {
     const code = char.codePointAt(0) ?? 0;
     if (
+      (code >= 0x3000 && code <= 0x30ff) ||
       (code >= 0x4e00 && code <= 0x9fff) ||
       (code >= 0x3400 && code <= 0x4dbf) ||
       (code >= 0x20000 && code <= 0x2a6df) ||
@@ -204,12 +226,25 @@ export async function runRepl(client: Client, options?: { initialMasked?: boolea
     createdAt: string;
   };
 
+  type IndexedMessage = {
+    index: number;
+    id: string;
+    senderId: string;
+    senderName: string;
+    preview: string;
+  };
+
   let imageEntries: IndexedImage[] = [];
   const imageIndexById = new Map<string, number>();
   const imageCache = new Map<string, Uint8Array>();
+  let messageEntries: IndexedMessage[] = [];
+  const messageIndexById = new Map<string, number>();
+  let pendingQuote: { index: number; meta: QuotedMessageMetadata } | null = null;
   let pendingImages: PreparedUploadImage[] = [];
   const previewManager = new PreviewManager();
   let autoImg = false;
+  let historyCursor: string | null = null;
+  let historyHasMore = false;
 
   const onProcessExit = () => {
     previewManager.cleanup();
@@ -220,7 +255,55 @@ export async function runRepl(client: Client, options?: { initialMasked?: boolea
     imageEntries = [];
     imageIndexById.clear();
     imageCache.clear();
+    messageEntries = [];
+    messageIndexById.clear();
+    pendingQuote = null;
     pendingImages = [];
+    historyCursor = null;
+    historyHasMore = false;
+  }
+
+  function registerMessage(decrypted: DecryptedMessage): IndexedMessage {
+    const existingIdx = messageIndexById.get(decrypted.message.id);
+    if (existingIdx !== undefined) {
+      const existing = messageEntries.find((item) => item.index === existingIdx);
+      if (existing) return existing;
+    }
+    const entry: IndexedMessage = {
+      index: messageEntries.length + 1,
+      id: decrypted.message.id,
+      senderId: decrypted.message.sender.id,
+      senderName: decrypted.message.sender.displayName,
+      preview: quotePreviewOf(decrypted),
+    };
+    messageEntries.push(entry);
+    messageIndexById.set(entry.id, entry.index);
+    return entry;
+  }
+
+  function resolveMessageEntry(token?: string): IndexedMessage | null {
+    if (!messageEntries.length) {
+      console.log(c.yellow("当前会话还没有已加载的消息可引用"));
+      return null;
+    }
+    if (!token) {
+      // Default: latest message from someone else, falling back to latest overall
+      for (let i = messageEntries.length - 1; i >= 0; i -= 1) {
+        if (messageEntries[i]!.senderId !== client.user.id) return messageEntries[i]!;
+      }
+      return messageEntries[messageEntries.length - 1]!;
+    }
+    const normalized = token.startsWith("#") ? token.slice(1) : token;
+    const idx = Number.parseInt(normalized, 10);
+    if (!Number.isInteger(idx) || idx < 1 || idx > messageEntries.length) {
+      console.log(c.yellow(`找不到消息 #${normalized}，当前可引用范围：#1 ~ #${messageEntries.length}`));
+      return null;
+    }
+    return messageEntries[idx - 1] ?? null;
+  }
+
+  function toQuotedMetadata(entry: IndexedMessage): QuotedMessageMetadata {
+    return { id: entry.id, senderName: entry.senderName, preview: entry.preview };
   }
 
   function registerImages(decrypted: DecryptedMessage, conversation: ConversationDto): IndexedImage[] {
@@ -337,6 +420,7 @@ export async function runRepl(client: Client, options?: { initialMasked?: boolea
     images: PreparedUploadImage[],
     caption: string,
     eraseRawLine?: { promptText: string; rawLine: string },
+    replyTo?: QuotedMessageMetadata,
   ) {
     if (!activeConversation) {
       console.log(c.yellow("当前暂无活跃会话，请先输入 /list 或 /open <用户名> 选择会话"));
@@ -382,7 +466,7 @@ export async function runRepl(client: Client, options?: { initialMasked?: boolea
 
       const encrypted = await client.e2ee.encryptContent(
         conv,
-        { text: caption || undefined, attachments: metadataList },
+        { text: caption || undefined, attachments: metadataList, ...(replyTo ? { replyTo } : {}) },
         keyVersion,
       );
       const sent = await client.sendMessage(
@@ -393,6 +477,7 @@ export async function runRepl(client: Client, options?: { initialMasked?: boolea
         clientId,
         metadataList.map((item) => item.id),
       );
+      client.syncUser(sent.sender);
 
       const decrypted: DecryptedMessage = {
         message: {
@@ -400,9 +485,10 @@ export async function runRepl(client: Client, options?: { initialMasked?: boolea
           text: caption || null,
           attachments: metadataList.map((item) => ({ ...item, encrypted: true })),
         },
-        content: { text: caption || undefined, attachments: metadataList },
+        content: { text: caption || undefined, attachments: metadataList, ...(replyTo ? { replyTo } : {}) },
       };
       registerImages(decrypted, conv);
+      const msgEntry = registerMessage(decrypted);
       for (let idx = 0; idx < images.length; idx += 1) {
         const prepared = images[idx]!;
         const meta = metadataList[idx]!;
@@ -418,12 +504,112 @@ export async function runRepl(client: Client, options?: { initialMasked?: boolea
         if (eraseRawLine) {
           eraseSubmittedLine(eraseRawLine.promptText, eraseRawLine.rawLine);
         }
-        console.log("  " + decryptedLine(decrypted, client.user, false, lookupImageIndex));
+        console.log("  " + decryptedLine(decrypted, client.user, false, lookupImageIndex, conv, msgEntry.index));
       }
       return true;
     } catch (err) {
       localClientIds.delete(clientId);
       console.log(c.red(`  [发送图片失败: ${err instanceof Error ? err.message : err}]`));
+      return false;
+    }
+  }
+
+  async function sendPixelSticker(
+    sticker: PixelSticker,
+    caption: string,
+    eraseRawLine?: { promptText: string; rawLine: string },
+    replyTo?: QuotedMessageMetadata,
+  ) {
+    if (!activeConversation) {
+      console.log(c.yellow("当前暂无活跃会话，请先输入 /list 或 /open <用户名> 选择会话"));
+      return false;
+    }
+    const conv = activeConversation;
+    const textPayload = encodePixelStickerMessage(sticker, caption);
+    if (textPayload.length > 4000) {
+      console.log(c.red("消息长度不能超过 4000 个字符"));
+      return false;
+    }
+    const clientId = randomUUID();
+    localClientIds.add(clientId);
+    try {
+      const encrypted = await client.e2ee.encryptContent(
+        conv,
+        { text: textPayload, attachments: [], ...(replyTo ? { replyTo } : {}) },
+      );
+      const sent = await client.sendMessage(conv.id, encrypted.ciphertext, encrypted.nonce, encrypted.keyVersion, clientId);
+      client.syncUser(sent.sender);
+      const decrypted: DecryptedMessage = {
+        message: { ...sent, text: textPayload, attachments: [] },
+        content: { text: textPayload, attachments: [], ...(replyTo ? { replyTo } : {}) },
+      };
+      const msgEntry = registerMessage(decrypted);
+      if (!isMasked) {
+        if (eraseRawLine) {
+          eraseSubmittedLine(eraseRawLine.promptText, eraseRawLine.rawLine);
+        }
+        const idxPrefix = `${c.dim(`#${msgEntry.index}`)} `;
+        const timeStr = c.gray(`[${formatTime(sent.createdAt)}]`);
+        const nameStr = c.bold(c.cyan(`${sent.sender.displayName}(我)`));
+        const styledCaption = caption
+          ? ` ${conv.type === "GROUP" ? highlightMentions(caption, client.user, conv.members) : c.brightWhite(caption)}`
+          : "";
+        const quoteLine = replyTo ? `\n${formatQuoteBlock(replyTo)}` : "";
+        console.log(`  ${idxPrefix}${timeStr} ${nameStr}: ${c.dim(`[${sticker.label}]`)}${styledCaption}${quoteLine}\n${renderPixelSticker(sticker, "      ")}`);
+      }
+      return true;
+    } catch (err) {
+      localClientIds.delete(clientId);
+      console.log(c.red(`  [发送表情失败: ${err instanceof Error ? err.message : err}]`));
+      return false;
+    }
+  }
+
+  async function sendTextMessage(
+    text: string,
+    eraseRawLine?: { promptText: string; rawLine: string },
+    replyTo?: QuotedMessageMetadata,
+  ) {
+    if (!activeConversation) {
+      console.log(c.yellow("当前暂无活跃会话，请先输入 /list 或 /open <用户名> 选择会话"));
+      return false;
+    }
+    if (text.length > 4000) {
+      console.log(c.red("消息长度不能超过 4000 个字符"));
+      return false;
+    }
+    const conv = activeConversation;
+    const clientId = randomUUID();
+    localClientIds.add(clientId);
+    try {
+      const encrypted = await client.e2ee.encryptContent(
+        conv,
+        { text, attachments: [], ...(replyTo ? { replyTo } : {}) },
+      );
+      const sent = await client.sendMessage(conv.id, encrypted.ciphertext, encrypted.nonce, encrypted.keyVersion, clientId);
+      client.syncUser(sent.sender);
+      const decrypted: DecryptedMessage = {
+        message: { ...sent, text, attachments: [] },
+        content: { text, attachments: [], ...(replyTo ? { replyTo } : {}) },
+      };
+      const msgEntry = registerMessage(decrypted);
+      if (!isMasked) {
+        if (eraseRawLine) {
+          eraseSubmittedLine(eraseRawLine.promptText, eraseRawLine.rawLine);
+        }
+        const idxPrefix = `${c.dim(`#${msgEntry.index}`)} `;
+        const timeStr = c.gray(`[${formatTime(sent.createdAt)}]`);
+        const nameStr = c.bold(c.cyan(`${sent.sender.displayName}(我)`));
+        const formattedBody = conv.type === "GROUP"
+          ? highlightMentions(text, client.user, conv.members)
+          : c.brightWhite(text);
+        const quoteLine = replyTo ? `\n${formatQuoteBlock(replyTo)}` : "";
+        console.log(`  ${idxPrefix}${timeStr} ${nameStr}: ${formattedBody}${quoteLine}`);
+      }
+      return true;
+    } catch (err) {
+      localClientIds.delete(clientId);
+      console.log(c.red(`  [发送失败: ${err instanceof Error ? err.message : err}]`));
       return false;
     }
   }
@@ -446,8 +632,9 @@ export async function runRepl(client: Client, options?: { initialMasked?: boolea
     const title = activeConversation.type === "GROUP"
       ? (activeConversation.name ?? "群聊")
       : (activeConversation.members.find((m) => m.id !== client.user.id)?.displayName ?? "私聊");
+    const quoteBadge = pendingQuote ? ` ${c.bold(c.brightYellow(`[引用 #${pendingQuote.index} ${pendingQuote.meta.senderName}]`))}` : "";
     const pendingBadge = pendingImages.length > 0 ? ` ${c.bold(c.brightCyan(`[待发 ${pendingImages.length} 图]`))}` : "";
-    return `${c.bold(c.brightGreen(`[${title}]`))}${pendingBadge} ${c.bold(c.cyan(">"))} `;
+    return `${c.bold(c.brightGreen(`[${title}]`))}${quoteBadge}${pendingBadge} ${c.bold(c.cyan(">"))} `;
   }
 
   function printHeader() {
@@ -463,37 +650,90 @@ export async function runRepl(client: Client, options?: { initialMasked?: boolea
     } else {
       printBoxLine("当前会话:", c.gray("无活跃会话 (输入 /list 查看，或 /open <用户名> 发起)"));
     }
-    console.log(c.blue("| ") + c.gray("提示: 直接打字发送; Ctrl+V 粘贴截图 / 拖入或粘贴图片路径直接发; /i 看图; 两次Esc/Ctrl+B 伪装"));
+    console.log(c.blue("| ") + c.gray("提示: 直接打字发消息; >编号/r 引用回复; :doge 发像素表情; 群聊 @Tab 提及; /more 翻页; 两次Esc 伪装"));
     printBorder();
     console.log("");
   }
 
+  async function fetchMessageBatch(conversationId: string, startCursor: string | undefined, targetCount: number) {
+    const capped = Math.min(Math.max(1, targetCount), 500);
+    const collected: Awaited<ReturnType<typeof client.messages>>["items"] = [];
+    let cursor = startCursor;
+    while (collected.length < capped) {
+      const remaining = capped - collected.length;
+      const page = await client.messages(conversationId, cursor, Math.min(100, remaining));
+      collected.unshift(...page.items);
+      cursor = page.nextCursor ?? undefined;
+      if (!cursor || page.items.length === 0) break;
+    }
+    return { items: collected, nextCursor: cursor ?? null };
+  }
+
+  async function printMessageBatch(
+    conversation: ConversationDto,
+    items: Awaited<ReturnType<typeof client.messages>>["items"],
+  ) {
+    for (const raw of items) {
+      try {
+        const decrypted = await client.e2ee.decryptMessage(raw, conversation);
+        registerImages(decrypted, conversation);
+        const msgEntry = registerMessage(decrypted);
+        console.log("  " + decryptedLine(decrypted, client.user, false, lookupImageIndex, conversation, msgEntry.index));
+      } catch {
+        const timeStr = c.gray(`[${formatTime(raw.createdAt)}]`);
+        const nameStr = c.bold(c.brightYellow(raw.sender.displayName));
+        console.log(`  ${timeStr} ${nameStr}: ${c.red("[解密失败]")}`);
+      }
+    }
+  }
+
   async function showHistory(conversation: ConversationDto, limit = 10) {
     try {
-      const page = await client.messages(conversation.id, undefined, limit);
-      if (!page.items.length) {
+      const batch = await fetchMessageBatch(conversation.id, undefined, limit);
+      historyCursor = batch.nextCursor;
+      historyHasMore = Boolean(batch.nextCursor);
+      if (!batch.items.length) {
         console.log(c.gray("  [暂无历史消息]"));
         console.log("");
         return;
       }
-      for (const raw of page.items) {
-        try {
-          const decrypted = await client.e2ee.decryptMessage(raw, conversation);
-          registerImages(decrypted, conversation);
-          console.log("  " + decryptedLine(decrypted, client.user, false, lookupImageIndex));
-        } catch {
-          const timeStr = c.gray(`[${formatTime(raw.createdAt)}]`);
-          const nameStr = c.bold(c.brightYellow(raw.sender.displayName));
-          console.log(`  ${timeStr} ${nameStr}: ${c.red("[解密失败]")}`);
-        }
+      if (historyHasMore) {
+        console.log(c.dim("  [上方还有更早消息，输入 /more 继续往前翻页]"));
       }
+      await printMessageBatch(conversation, batch.items);
       console.log("");
-      const last = page.items[page.items.length - 1];
+      const last = batch.items[batch.items.length - 1];
       if (last && last.sender.id !== client.user.id) {
         await client.markRead(conversation.id, last.id).catch(() => undefined);
       }
     } catch (cause) {
       console.log(c.red(`  [加载历史失败: ${cause instanceof Error ? cause.message : cause}]`));
+      console.log("");
+    }
+  }
+
+  async function showOlderHistory(conversation: ConversationDto, limit = 20) {
+    if (!historyHasMore || !historyCursor) {
+      console.log(c.gray("  [已经到顶了，没有更早的历史消息]"));
+      console.log("");
+      return;
+    }
+    try {
+      const batch = await fetchMessageBatch(conversation.id, historyCursor, limit);
+      historyCursor = batch.nextCursor;
+      historyHasMore = Boolean(batch.nextCursor);
+      if (!batch.items.length) {
+        console.log(c.gray("  [已经到顶了，没有更早的历史消息]"));
+        console.log("");
+        return;
+      }
+      console.log("");
+      printSectionHeader(`更早的历史消息 (${batch.items.length} 条)`);
+      await printMessageBatch(conversation, batch.items);
+      console.log(historyHasMore ? c.dim("  [继续输入 /more 查看更早消息]") : c.gray("  [已加载至最早一条消息]"));
+      console.log("");
+    } catch (cause) {
+      console.log(c.red(`  [翻页加载失败: ${cause instanceof Error ? cause.message : cause}]`));
       console.log("");
     }
   }
@@ -567,7 +807,20 @@ export async function runRepl(client: Client, options?: { initialMasked?: boolea
           const hits = ["on", "off"].filter((item) => item.startsWith(parts[1]!.toLowerCase()));
           return [hits.map((h) => `${parts[0]} ${h}`), line];
         }
+        if (["/e", "/emo", "/emoji", "/art"].includes(parts[0]!) && parts.length === 2) {
+          const hits = allStickerCompletionKeys().filter((item) => item.startsWith(parts[1]!.toLowerCase()));
+          return [hits.map((h) => `${parts[0]} ${h}`), line];
+        }
+        if (["/r", "/reply", "/quote"].includes(parts[0]!) && parts.length === 2) {
+          const candidates = messageEntries.slice(-20).reverse().map((m) => String(m.index));
+          const hits = candidates.filter((item) => item.startsWith(parts[1]!));
+          return [hits.map((h) => `${parts[0]} ${h}`), line];
+        }
       }
+      const colonComp = completeColonSticker(line);
+      if (colonComp) return colonComp;
+      const mentionComp = completeGroupMention(line, activeConversation, client.user.id);
+      if (mentionComp) return mentionComp;
       return [[], line];
     },
   });
@@ -598,7 +851,10 @@ export async function runRepl(client: Client, options?: { initialMasked?: boolea
       try {
         const decrypted = await client.e2ee.decryptMessage(incoming, conversation);
         const images = registerImages(decrypted, conversation);
-        safePrint(rl, "  " + decryptedLine(decrypted, client.user, false, lookupImageIndex));
+        const msgEntry = registerMessage(decrypted);
+        const mentionedMe = incoming.sender.id !== client.user.id && isMentioningMe(decrypted.message.text, client.user, conversation);
+        if (mentionedMe && process.stdout.isTTY) process.stdout.write("\x07");
+        safePrint(rl, "  " + decryptedLine(decrypted, client.user, false, lookupImageIndex, conversation, msgEntry.index));
         if (autoImg && !isMasked && images.length > 0 && detectImageProtocol() !== "none") {
           for (const entry of images) {
             if (isMasked) break;
@@ -623,7 +879,21 @@ export async function runRepl(client: Client, options?: { initialMasked?: boolea
       }
     } else {
       const from = conversationTitle(conversation, client.user.id);
-      safePrint(rl, `  ${c.brightMagenta(`[* 来自 ${incoming.sender.displayName} (${from}) 的新消息，输入 /s ${shortId(conversation.id)} 切换]`)}`);
+      let mentionedMe = false;
+      if (conversation.type === "GROUP" && incoming.sender.id !== client.user.id) {
+        try {
+          const decrypted = await client.e2ee.decryptMessage(incoming, conversation);
+          mentionedMe = isMentioningMe(decrypted.message.text, client.user, conversation);
+        } catch {
+          // Ignore decrypt errors on background notification
+        }
+      }
+      if (mentionedMe) {
+        if (process.stdout.isTTY) process.stdout.write("\x07");
+        safePrint(rl, `  ${c.alertBadge(" @你 ")} ${c.bold(c.brightYellow(`来自 ${incoming.sender.displayName} (${from}) 在群里提到了你，输入 /s ${shortId(conversation.id)} 切换`))}`);
+      } else {
+        safePrint(rl, `  ${c.brightMagenta(`[* 来自 ${incoming.sender.displayName} (${from}) 的新消息，输入 /s ${shortId(conversation.id)} 切换]`)}`);
+      }
     }
   });
 
@@ -638,6 +908,7 @@ export async function runRepl(client: Client, options?: { initialMasked?: boolea
     previewManager.cleanup();
     imageCache.clear();
     pendingImages = [];
+    pendingQuote = null;
     printMaskedHeader();
     rl.setPrompt(getPrompt());
   }
@@ -712,14 +983,21 @@ export async function runRepl(client: Client, options?: { initialMasked?: boolea
     }
   };
 
-  // 2. Pre-readline keypress listener: Backspace on an already-empty line removes the last pending Ctrl+V image
+  // 2. Pre-readline keypress listener: Backspace on an already-empty line removes the last pending Ctrl+V image or pending quote
   let isPastingClipboard = false;
   const onBeforeKeypress = (_str: string, key?: { name?: string; ctrl?: boolean }) => {
     if (isMasked || isToggling || !key) return;
-    if (key.name === "backspace" && !key.ctrl && pendingImages.length > 0 && rl.line.length === 0) {
-      const removed = pendingImages.pop()!;
-      rl.setPrompt(getPrompt());
-      safePrint(rl, `  ${c.gray(`[已撤销待发图片] ${removed.originalName} (剩余 ${pendingImages.length} 张)`)}`);
+    if (key.name === "backspace" && !key.ctrl && rl.line.length === 0) {
+      if (pendingImages.length > 0) {
+        const removed = pendingImages.pop()!;
+        rl.setPrompt(getPrompt());
+        safePrint(rl, `  ${c.gray(`[已撤销待发图片] ${removed.originalName} (剩余 ${pendingImages.length} 张)`)}`);
+      } else if (pendingQuote) {
+        const removed = pendingQuote;
+        pendingQuote = null;
+        rl.setPrompt(getPrompt());
+        safePrint(rl, `  ${c.gray(`[已取消引用 #${removed.index} ${removed.meta.senderName}]`)}`);
+      }
     }
   };
 
@@ -802,11 +1080,14 @@ export async function runRepl(client: Client, options?: { initialMasked?: boolea
     if (!line) {
       if (!isMasked && pendingImages.length > 0) {
         const toSend = pendingImages;
+        const quote = pendingQuote;
         pendingImages = [];
+        pendingQuote = null;
         rl.setPrompt(getPrompt());
-        const ok = await sendPreparedImages(toSend, "", { promptText: promptBeforeSubmit, rawLine });
+        const ok = await sendPreparedImages(toSend, "", { promptText: promptBeforeSubmit, rawLine }, quote?.meta);
         if (!ok) {
           pendingImages = toSend;
+          pendingQuote = quote;
           rl.setPrompt(getPrompt());
         }
       }
@@ -857,22 +1138,28 @@ export async function runRepl(client: Client, options?: { initialMasked?: boolea
         }
         if (!prepFailed) {
           const prevPending = pendingImages;
+          const prevQuote = pendingQuote;
           const combined = [...prevPending, ...preparedFromPaths];
           pendingImages = [];
+          pendingQuote = null;
           rl.setPrompt(getPrompt());
-          const ok = await sendPreparedImages(combined, extracted.caption, {
-            promptText: promptBeforeSubmit,
-            rawLine,
-          });
+          const ok = await sendPreparedImages(
+            combined,
+            extracted.caption,
+            { promptText: promptBeforeSubmit, rawLine },
+            prevQuote?.meta,
+          );
           if (!ok) {
             pendingImages = prevPending;
+            pendingQuote = prevQuote;
             rl.setPrompt(getPrompt());
           }
         }
         rl.prompt();
         return;
       }
-      if (line.startsWith("/") && looksLikeImageFilePath(line)) {
+      const trimmedStart = line.replace(/^['"]/, "");
+      if ((line.startsWith("/") || /^[a-zA-Z]:[\\/]/.test(trimmedStart) || trimmedStart.startsWith("\\\\")) && looksLikeImageFilePath(line)) {
         console.log(c.red(`  [找不到图片文件: ${line}]`));
         rl.prompt();
         return;
@@ -891,13 +1178,19 @@ export async function runRepl(client: Client, options?: { initialMasked?: boolea
           printBorder("可用快捷指令与发图方式");
           console.log(`  ${c.bold(c.brightCyan("Ctrl+V"))}   ${c.cyan("(快捷键)")}      ${c.gray(" ".repeat(14))} 粘贴剪贴板截图/图片到待发区，回车即发 (空行退格撤销)`);
           console.log(`  ${c.bold(c.brightCyan("拖入/粘贴路径"))} ${c.cyan("<图片路径>")}  ${c.gray(" ".repeat(10))} 直接把图片拖进终端或粘贴路径即可发图 (可同行配文字)`);
+          console.log(`  ${c.bold(c.brightCyan(":表情名"))}  ${c.cyan("[附带文字]")}     ${c.gray("(如 :doge / :6)")} 极速发送 8-bit 像素表情 (输入 : 按 Tab 补全)`);
+          console.log(`  ${c.bold(c.brightCyan(">编号"))}    ${c.cyan("[回复内容]")}     ${c.gray("(如 >3 好的)")}   极速引用 #编号 消息回复 (仅输 >3 进入待引用状态)`);
+          console.log(`  ${c.bold(c.brightCyan("@成员"))}    ${c.cyan("(群聊 Tab 补全)")} ${c.gray(" ".repeat(8))} 群聊提及成员或 @all，@到你时高亮并提醒`);
+          console.log(`  ${c.bold(c.brightYellow("/reply"))}   ${c.cyan("[编号] [内容]")}  ${c.gray("(简写: /r)")}   引用消息回复 (支持 :表情 / 空行退格取消引用)`);
           console.log(`  ${c.bold(c.brightYellow("/img"))}     ${c.cyan("[编号] [选项]")}  ${c.gray("(简写: /i)")}   终端高清看图 (默认最新; 支持 --open/--thumb/--ascii/ls)`);
+          console.log(`  ${c.bold(c.brightYellow("/emo"))}     ${c.cyan("[名称|编号] [字]")} ${c.gray("(简写: /e)")}   预览 8-bit 彩色像素表情面板或发送表情`);
           console.log(`  ${c.bold(c.brightYellow("/view"))}    ${c.cyan("[编号]")}        ${c.gray("(简写: /v)")}   系统 QuickLook / 预览器无损放大原图`);
           console.log(`  ${c.bold(c.brightYellow("/save"))}    ${c.cyan("[编号] [目录]")}  ${c.gray(" ".repeat(12))} 解密并保存原图到本地目录 (默认当前目录)`);
           console.log(`  ${c.bold(c.brightYellow("/autoimg"))} ${c.cyan("[on|off]")}      ${c.gray(" ".repeat(12))} 开启/关闭收到图片时自动内联预览缩略图`);
           console.log(`  ${c.bold(c.brightYellow("/switch"))}  ${c.cyan("<名称|ID>")}     ${c.gray("(简写: /s)")}   切换当前聊天会话`);
           console.log(`  ${c.bold(c.brightYellow("/list"))}    ${c.gray(" ".repeat(13))}   ${c.gray("(简写: /ls)")}  列出全部会话及未读数`);
-          console.log(`  ${c.bold(c.brightYellow("/history"))} ${c.cyan("[条数]")}        ${c.gray("(简写: /h)")}   查看历史记录 (默认 20 条)`);
+          console.log(`  ${c.bold(c.brightYellow("/history"))} ${c.cyan("[条数]")}        ${c.gray("(简写: /h)")}   查看最近历史记录 (默认 20 条，支持跨页拉取)`);
+          console.log(`  ${c.bold(c.brightYellow("/more"))}    ${c.cyan("[条数]")}        ${c.gray("(简写: /mo)")}  继续往前翻一页更早的历史消息 (默认每次 20 条)`);
           console.log(`  ${c.bold(c.brightYellow("/open"))}    ${c.cyan("<用户名>")}      ${c.gray(" ".repeat(14))} 发起或进入私聊`);
           console.log(`  ${c.bold(c.brightYellow("/group"))}   ${c.cyan("<群名> <成员>")}   ${c.gray(" ".repeat(10))} 创建新群聊`);
           console.log(`  ${c.bold(c.brightYellow("/whoami"))}  ${c.gray(" ".repeat(13))}   ${c.gray(" ".repeat(14))} 查看当前账号、加密与看图协议状态`);
@@ -908,6 +1201,99 @@ export async function runRepl(client: Client, options?: { initialMasked?: boolea
           printBorder();
           console.log("");
           break;
+
+        case "reply":
+        case "quote":
+        case "r": {
+          if (!activeConversation) {
+            console.log(c.yellow("当前暂无活跃会话，请先输入 /list 或 /open <用户名> 选择会话"));
+            break;
+          }
+          const tokens = arg.split(/\s+/).filter(Boolean);
+          const firstToken = tokens[0];
+          let entry: IndexedMessage | null = null;
+          let replyBody = "";
+
+          if (!firstToken) {
+            entry = resolveMessageEntry();
+          } else if (/^#?\d+$/.test(firstToken)) {
+            entry = resolveMessageEntry(firstToken);
+            replyBody = arg.slice(firstToken.length).trim();
+          } else {
+            entry = resolveMessageEntry();
+            replyBody = arg;
+          }
+
+          if (!entry) break;
+          const meta = toQuotedMetadata(entry);
+
+          if (!replyBody) {
+            pendingQuote = { index: entry.index, meta };
+            rl.setPrompt(getPrompt());
+            console.log(`  ${c.yellow(`[正在引用 #${entry.index}]`)} ${c.gray(`${entry.senderName}: ${entry.preview}`)} ${c.dim("— 直接输入文字/表情/截图发送，空行按 Backspace 取消")}`);
+            break;
+          }
+
+          const stickerShortcut = parseColonStickerShortcut(replyBody);
+          if (stickerShortcut) {
+            await sendPixelSticker(stickerShortcut.sticker, stickerShortcut.caption, undefined, meta);
+          } else {
+            await sendTextMessage(replyBody, undefined, meta);
+          }
+          break;
+        }
+
+        case "emo":
+        case "emoji":
+        case "art":
+        case "e": {
+          const tokens = arg.split(/\s+/).filter(Boolean);
+          const key = tokens[0];
+          if (!key || key.toLowerCase() === "ls" || key.toLowerCase() === "list") {
+            console.log("");
+            printSectionHeader("8-bit 像素表情库 (/e <名称|编号|中文> [附带文字])");
+            const cols = 4;
+            const cellWidth = 18;
+            for (let rowStart = 0; rowStart < PIXEL_STICKERS.length; rowStart += cols) {
+              const rowItems = PIXEL_STICKERS.slice(rowStart, rowStart + cols);
+              const headers = rowItems.map((item, offset) => {
+                const idx = rowStart + offset + 1;
+                const plain = `#${idx} ${item.id} ${item.label}`;
+                const styled = `${c.gray(`#${idx}`)} ${c.bold(c.brightYellow(item.id))} ${c.dim(item.label)}`;
+                const pad = " ".repeat(Math.max(2, cellWidth - visualWidth(plain)));
+                return `${styled}${pad}`;
+              });
+              console.log(`  ${headers.join("")}`);
+
+              const rendered = rowItems.map((item) => renderPixelStickerLines(item));
+              const lineCount = rendered[0]?.length ?? 5;
+              for (let r = 0; r < lineCount; r += 1) {
+                const cells = rendered.map((lines) => {
+                  const spriteLine = lines[r] ?? " ".repeat(10);
+                  return `${spriteLine}${" ".repeat(cellWidth - 10)}`;
+                });
+                console.log(`  ${cells.join("")}`);
+              }
+              console.log("");
+            }
+            break;
+          }
+
+          if (!activeConversation) {
+            console.log(c.yellow("当前暂无活跃会话，请先输入 /list 或 /open <用户名> 选择会话"));
+            break;
+          }
+
+          const sticker = resolvePixelSticker(key);
+          if (!sticker) {
+            console.log(c.yellow(`找不到像素表情 "${key}"，输入 /e 查看全部可用表情`));
+            break;
+          }
+
+          const caption = arg.slice(key.length).trim();
+          await sendPixelSticker(sticker, caption);
+          break;
+        }
 
         case "pic":
         case "sendimg": {
@@ -1080,8 +1466,12 @@ export async function runRepl(client: Client, options?: { initialMasked?: boolea
               ? c.bold(c.brightGreen(conversationTitle(item, client.user.id)))
               : c.bold(c.brightWhite(conversationTitle(item, client.user.id)));
             const unread = item.unreadCount > 0 ? c.bold(c.brightRed(` [${item.unreadCount} 条未读]`)) : "";
-            const lastText = item.lastMessage?.text
-              ? c.gray(` — ${item.lastMessage.text}`)
+            const rawLast = item.lastMessage?.text;
+            const parsedLastPixel = rawLast ? parsePixelStickerMessage(rawLast) : null;
+            const lastText = parsedLastPixel
+              ? c.cyan(` — [表情:${parsedLastPixel.sticker.label}]${parsedLastPixel.caption ? ` ${parsedLastPixel.caption}` : ""}`)
+              : rawLast
+              ? c.gray(` — ${rawLast.includes("\n") ? (rawLast.split(/\r?\n/).map((l) => l.trim()).find(Boolean) ?? "[多行消息]") : rawLast}`)
               : item.lastMessage?.attachments.length
               ? c.cyan(" — [图片]")
               : "";
@@ -1134,6 +1524,19 @@ export async function runRepl(client: Client, options?: { initialMasked?: boolea
           printSectionHeader(`历史记录 (${isNaN(count) ? 20 : count} 条)`);
           await showHistory(activeConversation, isNaN(count) ? 20 : count);
           break;
+
+        case "more":
+        case "mo":
+        case "prev":
+        case "older": {
+          if (!activeConversation) {
+            console.log(c.yellow("暂无活跃会话，请先 /list 选择会话"));
+            break;
+          }
+          const moreCount = arg ? parseInt(arg, 10) : 20;
+          await showOlderHistory(activeConversation, isNaN(moreCount) || moreCount <= 0 ? 20 : moreCount);
+          break;
+        }
 
         case "open":
           if (!arg) {
@@ -1238,37 +1641,71 @@ export async function runRepl(client: Client, options?: { initialMasked?: boolea
 
     if (pendingImages.length > 0) {
       const toSend = pendingImages;
+      const quote = pendingQuote;
       pendingImages = [];
+      pendingQuote = null;
       rl.setPrompt(getPrompt());
-      const ok = await sendPreparedImages(toSend, line, { promptText: promptBeforeSubmit, rawLine });
+      const ok = await sendPreparedImages(toSend, line, { promptText: promptBeforeSubmit, rawLine }, quote?.meta);
       if (!ok) {
         pendingImages = toSend;
+        pendingQuote = quote;
         rl.setPrompt(getPrompt());
       }
       rl.prompt();
       return;
     }
 
-    if (line.length > 4000) {
-      console.log(c.red("消息长度不能超过 4000 个字符"));
+    // Fast Markdown-style quote shortcut (e.g. >3 好的, >3 :ok, or >3 to arm pending quote)
+    const quickQuote = parseQuickQuoteShortcut(line);
+    if (quickQuote) {
+      const entry = resolveMessageEntry(quickQuote.targetToken);
+      if (entry) {
+        const meta = toQuotedMetadata(entry);
+        if (!quickQuote.body) {
+          eraseSubmittedLine(promptBeforeSubmit, rawLine);
+          pendingQuote = { index: entry.index, meta };
+          rl.setPrompt(getPrompt());
+          console.log(`  ${c.yellow(`[正在引用 #${entry.index}]`)} ${c.gray(`${entry.senderName}: ${entry.preview}`)} ${c.dim("— 直接输入文字/表情/截图发送，空行按 Backspace 取消")}`);
+        } else {
+          const stickerShortcut = parseColonStickerShortcut(quickQuote.body);
+          if (stickerShortcut) {
+            await sendPixelSticker(stickerShortcut.sticker, stickerShortcut.caption, { promptText: promptBeforeSubmit, rawLine }, meta);
+          } else {
+            await sendTextMessage(quickQuote.body, { promptText: promptBeforeSubmit, rawLine }, meta);
+          }
+        }
+      }
       rl.prompt();
       return;
     }
 
-    const clientId = randomUUID();
-    localClientIds.add(clientId);
+    // Fast colon shortcut for pixel stickers (e.g. :doge, :ok 收到, :6, :狗头)
+    const colonSticker = parseColonStickerShortcut(line);
+    if (colonSticker) {
+      const quote = pendingQuote;
+      pendingQuote = null;
+      rl.setPrompt(getPrompt());
+      const ok = await sendPixelSticker(
+        colonSticker.sticker,
+        colonSticker.caption,
+        { promptText: promptBeforeSubmit, rawLine },
+        quote?.meta,
+      );
+      if (!ok && quote) {
+        pendingQuote = quote;
+        rl.setPrompt(getPrompt());
+      }
+      rl.prompt();
+      return;
+    }
 
-    try {
-      const encrypted = await client.e2ee.encryptContent(activeConversation, { text: line, attachments: [] });
-      await client.sendMessage(activeConversation.id, encrypted.ciphertext, encrypted.nonce, encrypted.keyVersion, clientId);
-      const now = new Date().toISOString();
-      const timeStr = c.gray(`[${formatTime(now)}]`);
-      const nameStr = c.bold(c.cyan(`${client.user.displayName}(我)`));
-      eraseSubmittedLine(promptBeforeSubmit, rawLine);
-      console.log(`  ${timeStr} ${nameStr}: ${c.brightWhite(line)}`);
-    } catch (err) {
-      localClientIds.delete(clientId);
-      console.log(c.red(`  [发送失败: ${err instanceof Error ? err.message : err}]`));
+    const activeQuote = pendingQuote;
+    pendingQuote = null;
+    rl.setPrompt(getPrompt());
+    const sentOk = await sendTextMessage(line, { promptText: promptBeforeSubmit, rawLine }, activeQuote?.meta);
+    if (!sentOk && activeQuote) {
+      pendingQuote = activeQuote;
+      rl.setPrompt(getPrompt());
     }
 
     rl.prompt();

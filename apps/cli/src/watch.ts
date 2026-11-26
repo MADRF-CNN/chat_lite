@@ -44,7 +44,7 @@ export async function watch(client: Client, autoRead: boolean) {
       return;
     }
     const decrypted = await client.e2ee.decryptMessage(message, conversation);
-    info(decryptedLine(decrypted, client.user));
+    info(decryptedLine(decrypted, client.user, false, undefined, conversation));
     if (autoRead && message.sender.id !== client.user.id) await client.markRead(conversation.id, message.id).catch(() => undefined);
   });
 

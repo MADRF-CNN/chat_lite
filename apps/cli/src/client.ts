@@ -39,9 +39,11 @@ async function jsonFetch<T>(url: string, init: RequestInit = {}): Promise<T> {
 
 class Transport {
   accessToken: string;
+  user?: UserSummary;
 
-  constructor(readonly apiUrl: string, private readonly secrets: Secrets, accessToken: string) {
+  constructor(readonly apiUrl: string, private readonly secrets: Secrets, accessToken: string, user?: UserSummary) {
     this.accessToken = accessToken;
+    this.user = user;
   }
 
   async request<T>(path: string, init: RequestInit = {}, retry = true): Promise<T> {
@@ -74,6 +76,13 @@ class Transport {
     this.accessToken = auth.accessToken;
     this.secrets.refreshToken = auth.refreshToken;
     writeSecrets(this.secrets);
+    if (auth.user) {
+      this.user = auth.user;
+      const existing = readConfig();
+      if (existing && (existing.user.displayName !== auth.user.displayName || existing.user.username !== auth.user.username || existing.user.id !== auth.user.id)) {
+        writeConfig({ ...existing, user: auth.user });
+      }
+    }
     return true;
   }
 }
@@ -102,12 +111,16 @@ export class Client {
 
   private constructor(
     readonly apiUrl: string,
-    readonly user: UserSummary,
+    private readonly fallbackUser: UserSummary,
     private readonly secrets: Secrets,
     private readonly transport: Transport,
     identity: Identity,
   ) {
     this.e2ee = createE2ee((path, init) => transport.request(path, init), (path) => transport.fetchBytes(path), identity);
+  }
+
+  get user(): UserSummary {
+    return this.transport.user ?? this.fallbackUser;
   }
 
   static async authenticate(rawApiUrl: string, path: "login" | "register", body: Record<string, string>) {
@@ -118,7 +131,7 @@ export class Client {
     const existing = readConfig();
     writeConfig({ apiUrl, user: auth.user, caPath: existing?.caPath });
     writeSecrets(secrets);
-    const transport = new Transport(apiUrl, secrets, auth.accessToken);
+    const transport = new Transport(apiUrl, secrets, auth.accessToken, auth.user);
     return new Client(apiUrl, auth.user, secrets, transport, await ensureIdentity(transport, auth.user, secrets));
   }
 
@@ -128,9 +141,19 @@ export class Client {
     const rawApiUrl = apiUrlOverride ?? config.apiUrl;
     const apiUrl = normalizeApiUrl(rawApiUrl);
     const secrets = readSecrets();
-    const transport = new Transport(apiUrl, secrets, "");
+    const transport = new Transport(apiUrl, secrets, "", config.user);
     if (!(await transport.refresh())) throw new Error("登录已过期，请重新执行 chat-lite login");
-    return new Client(transport.apiUrl, config.user, secrets, transport, await ensureIdentity(transport, config.user, secrets));
+    const currentUser = transport.user ?? config.user;
+    return new Client(transport.apiUrl, currentUser, secrets, transport, await ensureIdentity(transport, currentUser, secrets));
+  }
+
+  syncUser(next: UserSummary) {
+    if (next.id !== this.user.id) return;
+    const prev = this.user;
+    if (prev.displayName === next.displayName && prev.username === next.username) return;
+    this.transport.user = next;
+    const existing = readConfig();
+    if (existing) writeConfig({ ...existing, user: next });
   }
 
   get accessToken() { return this.transport.accessToken; }

@@ -2,6 +2,7 @@ import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, extname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import sharp from "sharp";
 
 export type ImageProtocol = "kitty" | "iterm2" | "halfblock" | "none";
@@ -75,7 +76,13 @@ export function detectImageProtocol(
   if (env.NO_COLOR) return "none";
 
   const colorTerm = (env.COLORTERM ?? "").toLowerCase();
-  if (colorTerm === "truecolor" || colorTerm === "24bit" || term.includes("256color") || term.includes("direct")) {
+  if (
+    colorTerm === "truecolor" ||
+    colorTerm === "24bit" ||
+    term.includes("256color") ||
+    term.includes("direct") ||
+    Boolean(env.WT_SESSION)
+  ) {
     return "halfblock";
   }
 
@@ -316,7 +323,7 @@ export function safeImageFilename(originalName: string, mimeType?: string): stri
 
 export function expandHome(inputPath: string): string {
   if (inputPath === "~") return homedir();
-  if (inputPath.startsWith("~/")) return join(homedir(), inputPath.slice(2));
+  if (inputPath.startsWith("~/") || inputPath.startsWith("~\\")) return join(homedir(), inputPath.slice(2));
   return inputPath;
 }
 
@@ -447,14 +454,28 @@ export function hasImageExtension(filePath: string): boolean {
   return IMAGE_EXTENSIONS.has(extname(filePath).toLowerCase());
 }
 
+function isWindowsPathStyle(value: string): boolean {
+  return (
+    /^[a-zA-Z]:[\\/]/.test(value) ||
+    value.startsWith("\\\\") ||
+    value.startsWith(".\\") ||
+    value.startsWith("..\\") ||
+    value.startsWith("~\\")
+  );
+}
+
 export function looksLikeImageFilePath(input: string): boolean {
   const trimmed = input.trim().replace(/^['"]|['"]$/g, "");
   if (!trimmed || !hasImageExtension(trimmed)) return false;
   return (
     trimmed.startsWith("~/") ||
+    trimmed.startsWith("~\\") ||
     trimmed.startsWith("./") ||
+    trimmed.startsWith(".\\") ||
     trimmed.startsWith("../") ||
+    trimmed.startsWith("..\\") ||
     trimmed.startsWith("file://") ||
+    isWindowsPathStyle(trimmed) ||
     (trimmed.startsWith("/") && trimmed.indexOf("/", 1) !== -1)
   );
 }
@@ -464,18 +485,26 @@ function resolveCandidateImagePath(rawToken: string): string | null {
   if (!candidate) return null;
   if (candidate.startsWith("file://")) {
     try {
-      candidate = decodeURIComponent(new URL(candidate).pathname);
+      candidate = fileURLToPath(candidate);
     } catch {
-      return null;
+      try {
+        candidate = decodeURIComponent(new URL(candidate).pathname);
+      } catch {
+        return null;
+      }
     }
   }
   const hasPathPrefix =
     candidate.startsWith("/") ||
     candidate.startsWith("~/") ||
+    candidate.startsWith("~\\") ||
     candidate.startsWith("./") ||
-    candidate.startsWith("../");
+    candidate.startsWith(".\\") ||
+    candidate.startsWith("../") ||
+    candidate.startsWith("..\\") ||
+    isWindowsPathStyle(candidate);
   if (!hasImageExtension(candidate)) return null;
-  if (!hasPathPrefix && !candidate.includes("/")) return null;
+  if (!hasPathPrefix && !candidate.includes("/") && !candidate.includes("\\")) return null;
 
   const fullPath = resolve(expandHome(candidate));
   try {
@@ -504,9 +533,10 @@ export function extractImagePathsFromLine(input: string): { imagePaths: string[]
     if (ch === "'" || ch === '"') {
       const quote = ch;
       i += 1;
+      const looksWinQuoted = quote === '"' && isWindowsPathStyle(input.slice(i));
       while (i < input.length) {
         const cur = input[i]!;
-        if (quote === '"' && cur === "\\" && i + 1 < input.length) {
+        if (quote === '"' && !looksWinQuoted && cur === "\\" && i + 1 < input.length) {
           decoded += input[i + 1]!;
           i += 2;
           continue;
@@ -519,9 +549,10 @@ export function extractImagePathsFromLine(input: string): { imagePaths: string[]
         i += 1;
       }
     } else {
+      const looksWinUnquoted = isWindowsPathStyle(input.slice(i));
       while (i < input.length) {
         const cur = input[i]!;
-        if (cur === "\\" && i + 1 < input.length) {
+        if (!looksWinUnquoted && cur === "\\" && i + 1 < input.length) {
           decoded += input[i + 1]!;
           i += 2;
           continue;
@@ -555,9 +586,10 @@ export function parsePathAndCaption(input: string): { path: string; caption: str
   if (first === "'" || first === '"') {
     let parsed = "";
     let i = 1;
+    const looksWinQuoted = first === '"' && isWindowsPathStyle(trimmed.slice(1));
     while (i < trimmed.length) {
       const ch = trimmed[i]!;
-      if (first === '"' && ch === "\\" && i + 1 < trimmed.length) {
+      if (first === '"' && !looksWinQuoted && ch === "\\" && i + 1 < trimmed.length) {
         parsed += trimmed[i + 1]!;
         i += 2;
         continue;
@@ -572,12 +604,13 @@ export function parsePathAndCaption(input: string): { path: string; caption: str
     return { path: parsed, caption: trimmed.slice(i).trim() };
   }
 
-  // Unquoted path with shell backslash escapes (e.g. Ghostty drag-and-drop: /path/Screen\ Shot.png 附带文字)
+  // Unquoted path: preserve backslashes on Windows paths, unescape POSIX shell escapes otherwise
+  const looksWinUnquoted = isWindowsPathStyle(trimmed);
   let parsed = "";
   let i = 0;
   while (i < trimmed.length) {
     const ch = trimmed[i]!;
-    if (ch === "\\" && i + 1 < trimmed.length) {
+    if (!looksWinUnquoted && ch === "\\" && i + 1 < trimmed.length) {
       parsed += trimmed[i + 1]!;
       i += 2;
       continue;
@@ -731,6 +764,69 @@ matched || "EMPTY";
       }
 
       throw new Error("剪贴板里没有图片（可先截屏 Cmd+Ctrl+Shift+4 或复制图片后再按 Ctrl+V）");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }
+
+  if (process.platform === "win32") {
+    const tempDir = mkdtempSync(join(tmpdir(), "chat-lite-clip-"));
+    const outPath = join(tempDir, "clip.png");
+    try {
+      const psScript = [
+        "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8",
+        "Add-Type -AssemblyName System.Windows.Forms",
+        "Add-Type -AssemblyName System.Drawing",
+        "$out = $env:CHAT_LITE_CLIP_OUT",
+        "if ([System.Windows.Forms.Clipboard]::ContainsImage()) {",
+        "  $img = [System.Windows.Forms.Clipboard]::GetImage()",
+        "  $img.Save($out, [System.Drawing.Imaging.ImageFormat]::Png)",
+        "  $img.Dispose()",
+        "  Write-Output 'DATA:.png'",
+        "} elseif ([System.Windows.Forms.Clipboard]::ContainsFileDropList()) {",
+        "  $files = [System.Windows.Forms.Clipboard]::GetFileDropList()",
+        "  if ($files.Count -gt 0) { Write-Output ('FILE:' + $files[0]) } else { Write-Output 'EMPTY' }",
+        "} elseif ([System.Windows.Forms.Clipboard]::ContainsText()) {",
+        "  Write-Output ('TEXT:' + [System.Windows.Forms.Clipboard]::GetText())",
+        "} else {",
+        "  Write-Output 'EMPTY'",
+        "}",
+      ].join("; ");
+
+      const result = execFileSync(
+        "powershell.exe",
+        ["-NoProfile", "-NonInteractive", "-STA", "-Command", psScript],
+        {
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "pipe"],
+          env: { ...process.env, CHAT_LITE_CLIP_OUT: outPath },
+        },
+      ).trim();
+
+      if (result.startsWith("DATA:")) {
+        const ext = result.slice("DATA:".length) || ".png";
+        const bytes = new Uint8Array(readFileSync(outPath));
+        return { bytes, name: defaultClipboardFilename(ext) };
+      }
+
+      if (result.startsWith("FILE:")) {
+        const filePath = result.slice("FILE:".length).trim();
+        if (!existsSync(filePath) || statSync(filePath).isDirectory()) {
+          throw new Error("剪贴板里的文件不是有效图片");
+        }
+        return { bytes: new Uint8Array(readFileSync(filePath)), name: basename(filePath) };
+      }
+
+      if (result.startsWith("TEXT:")) {
+        const text = result.slice("TEXT:".length).trim();
+        const { imagePaths } = extractImagePathsFromLine(text);
+        if (imagePaths.length === 1) {
+          const imgPath = imagePaths[0]!;
+          return { bytes: new Uint8Array(readFileSync(imgPath)), name: basename(imgPath) };
+        }
+      }
+
+      throw new Error("剪贴板里没有图片（可先截屏 Win+Shift+S 或复制图片后再输入 /paste 或按 Ctrl+V）");
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }

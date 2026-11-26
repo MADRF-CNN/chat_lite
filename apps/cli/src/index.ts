@@ -1,20 +1,24 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { commands } from "./commands";
 import { fail, info } from "./log";
 import { readConfig } from "./store";
 
-const VERSION = "0.1.0";
+const VERSION = "0.1.2";
 
 function findDefaultCa(): string | undefined {
+  const execDir = dirname(process.execPath);
   const candidates = [
     resolve(process.cwd(), "chat-lite-private-ca.crt"),
     resolve(__dirname, "chat-lite-private-ca.crt"),
     resolve(__dirname, "../chat-lite-private-ca.crt"),
     resolve(__dirname, "../../chat-lite-private-ca.crt"),
     resolve(__dirname, "../../../chat-lite-private-ca.crt"),
+    resolve(execDir, "chat-lite-private-ca.crt"),
+    resolve(execDir, "../chat-lite-private-ca.crt"),
+    resolve(execDir, "../../chat-lite-private-ca.crt"),
   ];
   for (const candidate of candidates) {
     if (existsSync(candidate)) return candidate;
@@ -127,7 +131,9 @@ async function main() {
   }
 
   const command = commands[commandName]!;
-  const caPath = startup.caPath ?? readConfig()?.caPath ?? findDefaultCa();
+  const savedCa = readConfig()?.caPath;
+  const validSavedCa = savedCa && existsSync(savedCa) ? savedCa : undefined;
+  const caPath = startup.caPath ?? validSavedCa ?? findDefaultCa();
   if (caPath && process.env.NODE_EXTRA_CA_CERTS !== caPath) {
     relaunch(caPath, startup.args);
     return;

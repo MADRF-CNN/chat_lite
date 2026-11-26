@@ -116,7 +116,12 @@ export async function decryptMessage(message: MessageDto, conversation: Conversa
     const { key } = await conversationKey(conversation, message.keyVersion);
     const plaintext = await crypto.subtle.decrypt({ name: "AES-GCM", iv: fromBase64(message.nonce) }, key, exactBuffer(fromBase64(message.ciphertext)));
     const content = JSON.parse(decoder.decode(plaintext)) as EncryptedMessageContent;
-    return { ...message, text: content.text ?? null, attachments: content.attachments.map((item) => ({ ...item, encrypted: true })) };
+    return {
+      ...message,
+      text: content.text ?? null,
+      attachments: content.attachments.map((item) => ({ ...item, encrypted: true })),
+      replyTo: content.replyTo,
+    };
   } catch {
     return { ...message, text: "[无法解密的消息]", attachments: [] };
   }

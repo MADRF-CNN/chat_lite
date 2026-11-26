@@ -2,6 +2,8 @@
 
 Chat Lite CLI 是一款面向开发者的现代化终端即时聊天客户端，采用类似 OpenAI Codex / Claude Code 的全屏命令行交互界面，具备极高的响应速度与极低的资源消耗。
 
+> **面向最终用户的完整安装与使用手册（含 macOS / Windows 独立安装包指南）**：请查看 [USAGE.md](./USAGE.md)。
+
 ---
 
 ## 特性亮点
