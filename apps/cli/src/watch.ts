@@ -28,29 +28,45 @@ export async function watch(client: Client, autoRead: boolean) {
     for (const id of conversations.keys()) join(id);
   });
 
+  const stopTokenSync = client.onAccessTokenRefreshed((token) => {
+    socket.auth = { token };
+  });
+
   socket.on("connect_error", async (error: Error) => {
-    if (await client.renewSession()) {
-      socket.auth = { token: client.accessToken };
-      socket.connect();
-      return;
+    try {
+      if (await client.renewSession()) {
+        socket.auth = { token: client.accessToken };
+        socket.connect();
+        return;
+      }
+    } catch {
+      // Fall through to fail
     }
     fail(`连接失败：${error.message}；请重新执行 chat-lite login`);
   });
 
   socket.on("message:new", async (message) => {
-    const conversation = conversations.get(message.conversationId);
-    if (!conversation) {
-      await sync();
-      return;
+    try {
+      const conversation = conversations.get(message.conversationId);
+      if (!conversation) {
+        await sync();
+        return;
+      }
+      const decrypted = await client.e2ee.decryptMessage(message, conversation);
+      info(decryptedLine(decrypted, client.user, false, undefined, conversation));
+      if (autoRead && message.sender.id !== client.user.id) await client.markRead(conversation.id, message.id).catch(() => undefined);
+    } catch {
+      // Keep watching on transient errors
     }
-    const decrypted = await client.e2ee.decryptMessage(message, conversation);
-    info(decryptedLine(decrypted, client.user, false, undefined, conversation));
-    if (autoRead && message.sender.id !== client.user.id) await client.markRead(conversation.id, message.id).catch(() => undefined);
   });
 
   const resync = async () => {
-    conversations.clear();
-    await sync();
+    try {
+      conversations.clear();
+      await sync();
+    } catch {
+      // Keep watching on transient errors
+    }
   };
 
   socket.on("membership:changed", () => void resync());
@@ -60,6 +76,7 @@ export async function watch(client: Client, autoRead: boolean) {
   });
 
   process.on("SIGINT", () => {
+    stopTokenSync();
     socket.close();
     info("\n已停止监听");
     process.exit(0);

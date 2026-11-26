@@ -18,6 +18,7 @@ import {
   type PixelSticker,
 } from "./pixel";
 import { completeGroupMention, highlightMentions, isMentioningMe } from "./mention";
+import { applyUpdateBundle, compareSemver, detectInstallLayout, readCurrentVersion } from "./updater";
 import { decryptedLine, formatQuoteBlock, formatSize, formatTime, parseQuickQuoteShortcut, quotePreviewOf, shortId } from "./format";
 import {
   PreviewManager,
@@ -66,6 +67,7 @@ const SLASH_COMMANDS = [
   "/open",
   "/group",
   "/whoami",
+  "/update",
   "/clear",
   "/c",
   "/mask",
@@ -767,10 +769,24 @@ export async function runRepl(client: Client, options?: { initialMasked?: boolea
     for (const id of conversationMap.keys()) joinConversation(id);
   });
 
+  const stopTokenSync = client.onAccessTokenRefreshed((token) => {
+    socket.auth = { token };
+  });
+
+  // Proactively keep access token fresh every 10 minutes so long idle sessions stay seamless
+  const keepAliveTimer = setInterval(() => {
+    void client.renewSession().catch(() => undefined);
+  }, 10 * 60 * 1000);
+  keepAliveTimer.unref?.();
+
   socket.on("connect_error", async () => {
-    if (await client.renewSession()) {
-      socket.auth = { token: client.accessToken };
-      socket.connect();
+    try {
+      if (await client.renewSession()) {
+        socket.auth = { token: client.accessToken };
+        socket.connect();
+      }
+    } catch {
+      // Socket.IO will retry automatically on transient network errors
     }
   });
 
@@ -825,81 +841,98 @@ export async function runRepl(client: Client, options?: { initialMasked?: boolea
     },
   });
 
+  async function syncConversationsQuietly() {
+    try {
+      conversations = await client.listConversations();
+      for (const item of conversations) {
+        conversationMap.set(item.id, item);
+        joinConversation(item.id);
+      }
+    } catch {
+      // Swallow transient network/auth errors in background socket sync so REPL never crashes
+    }
+  }
+
   // Background incoming message handler
   socket.on("message:new", async (incoming) => {
-    if (incoming.clientId && localClientIds.has(incoming.clientId)) {
-      localClientIds.delete(incoming.clientId);
-      return;
-    }
-
-    let conversation = conversationMap.get(incoming.conversationId);
-    if (!conversation) {
-      conversations = await client.listConversations();
-      for (const item of conversations) conversationMap.set(item.id, item);
-      conversation = conversationMap.get(incoming.conversationId);
-      if (conversation) joinConversation(conversation.id);
-    }
-    if (!conversation) return;
-
-    if (isMasked) {
-      maskedUnreadCount++;
-      safePrint(rl, c.dim(`[daemon] background telemetry synced (${maskedUnreadCount} items)`));
-      return;
-    }
-
-    if (activeConversation && incoming.conversationId === activeConversation.id) {
-      try {
-        const decrypted = await client.e2ee.decryptMessage(incoming, conversation);
-        const images = registerImages(decrypted, conversation);
-        const msgEntry = registerMessage(decrypted);
-        const mentionedMe = incoming.sender.id !== client.user.id && isMentioningMe(decrypted.message.text, client.user, conversation);
-        if (mentionedMe && process.stdout.isTTY) process.stdout.write("\x07");
-        safePrint(rl, "  " + decryptedLine(decrypted, client.user, false, lookupImageIndex, conversation, msgEntry.index));
-        if (autoImg && !isMasked && images.length > 0 && detectImageProtocol() !== "none") {
-          for (const entry of images) {
-            if (isMasked) break;
-            try {
-              await displayImage(entry, {
-                variant: "thumbnail",
-                quietMeta: true,
-                printer: (text) => safePrint(rl, text),
-              });
-            } catch (err) {
-              safePrint(rl, c.red(`  [图片 #${entry.index} 预览失败: ${err instanceof Error ? err.message : err}]`));
-            }
-          }
-        }
-        if (incoming.sender.id !== client.user.id) {
-          await client.markRead(conversation.id, incoming.id).catch(() => undefined);
-        }
-      } catch {
-        const timeStr = c.gray(`[${formatTime(incoming.createdAt)}]`);
-        const nameStr = c.bold(c.brightYellow(incoming.sender.displayName));
-        safePrint(rl, `  ${timeStr} ${nameStr}: ${c.red("[解密失败]")}`);
+    try {
+      if (incoming.clientId && localClientIds.has(incoming.clientId)) {
+        localClientIds.delete(incoming.clientId);
+        return;
       }
-    } else {
-      const from = conversationTitle(conversation, client.user.id);
-      let mentionedMe = false;
-      if (conversation.type === "GROUP" && incoming.sender.id !== client.user.id) {
+
+      let conversation = conversationMap.get(incoming.conversationId);
+      if (!conversation) {
+        await syncConversationsQuietly();
+        conversation = conversationMap.get(incoming.conversationId);
+      }
+      if (!conversation) return;
+
+      if (isMasked) {
+        maskedUnreadCount++;
+        safePrint(rl, c.dim(`[daemon] background telemetry synced (${maskedUnreadCount} items)`));
+        return;
+      }
+
+      if (activeConversation && incoming.conversationId === activeConversation.id) {
         try {
           const decrypted = await client.e2ee.decryptMessage(incoming, conversation);
-          mentionedMe = isMentioningMe(decrypted.message.text, client.user, conversation);
+          const images = registerImages(decrypted, conversation);
+          const msgEntry = registerMessage(decrypted);
+          const mentionedMe = incoming.sender.id !== client.user.id && isMentioningMe(decrypted.message.text, client.user, conversation);
+          if (mentionedMe && process.stdout.isTTY) process.stdout.write("\x07");
+          safePrint(rl, "  " + decryptedLine(decrypted, client.user, false, lookupImageIndex, conversation, msgEntry.index));
+          if (autoImg && !isMasked && images.length > 0 && detectImageProtocol() !== "none") {
+            for (const entry of images) {
+              if (isMasked) break;
+              try {
+                await displayImage(entry, {
+                  variant: "thumbnail",
+                  quietMeta: true,
+                  printer: (text) => safePrint(rl, text),
+                });
+              } catch (err) {
+                safePrint(rl, c.red(`  [图片 #${entry.index} 预览失败: ${err instanceof Error ? err.message : err}]`));
+              }
+            }
+          }
+          if (incoming.sender.id !== client.user.id) {
+            await client.markRead(conversation.id, incoming.id).catch(() => undefined);
+          }
         } catch {
-          // Ignore decrypt errors on background notification
+          const timeStr = c.gray(`[${formatTime(incoming.createdAt)}]`);
+          const nameStr = c.bold(c.brightYellow(incoming.sender.displayName));
+          safePrint(rl, `  ${timeStr} ${nameStr}: ${c.red("[解密失败]")}`);
+        }
+      } else {
+        const from = conversationTitle(conversation, client.user.id);
+        let mentionedMe = false;
+        if (conversation.type === "GROUP" && incoming.sender.id !== client.user.id) {
+          try {
+            const decrypted = await client.e2ee.decryptMessage(incoming, conversation);
+            mentionedMe = isMentioningMe(decrypted.message.text, client.user, conversation);
+          } catch {
+            // Ignore decrypt errors on background notification
+          }
+        }
+        if (mentionedMe) {
+          if (process.stdout.isTTY) process.stdout.write("\x07");
+          safePrint(rl, `  ${c.alertBadge(" @你 ")} ${c.bold(c.brightYellow(`来自 ${incoming.sender.displayName} (${from}) 在群里提到了你，输入 /s ${shortId(conversation.id)} 切换`))}`);
+        } else {
+          safePrint(rl, `  ${c.brightMagenta(`[* 来自 ${incoming.sender.displayName} (${from}) 的新消息，输入 /s ${shortId(conversation.id)} 切换]`)}`);
         }
       }
-      if (mentionedMe) {
-        if (process.stdout.isTTY) process.stdout.write("\x07");
-        safePrint(rl, `  ${c.alertBadge(" @你 ")} ${c.bold(c.brightYellow(`来自 ${incoming.sender.displayName} (${from}) 在群里提到了你，输入 /s ${shortId(conversation.id)} 切换`))}`);
-      } else {
-        safePrint(rl, `  ${c.brightMagenta(`[* 来自 ${incoming.sender.displayName} (${from}) 的新消息，输入 /s ${shortId(conversation.id)} 切换]`)}`);
-      }
+    } catch {
+      // Never allow background message handler to crash REPL
     }
   });
 
-  socket.on("conversation:updated", async () => {
-    conversations = await client.listConversations();
-    for (const item of conversations) conversationMap.set(item.id, item);
+  socket.on("conversation:updated", () => {
+    void syncConversationsQuietly();
+  });
+
+  socket.on("membership:changed", () => {
+    void syncConversationsQuietly();
   });
 
   function enterMaskMode() {
@@ -1072,6 +1105,21 @@ export async function runRepl(client: Client, options?: { initialMasked?: boolea
   process.stdin.prependListener("keypress", onBeforeKeypress);
   process.stdin.on("keypress", onKeypress);
 
+  // Silent non-blocking update check on startup
+  void (async () => {
+    try {
+      const latest = await client.latestCliRelease();
+      if (!latest || isMasked) return;
+      const current = readCurrentVersion();
+      if (compareSemver(latest.version, current) > 0) {
+        const noteText = latest.notes ? `（${latest.notes}）` : "";
+        safePrint(rl, `  ${c.bold(c.brightCyan(`[* 发现新版本 v${latest.version}，当前 v${current}${noteText} — 输入 /update 一键升级]`))}`);
+      }
+    } catch {
+      // Silently ignore if server does not yet support releases API or network is offline
+    }
+  })();
+
   rl.prompt();
 
   rl.on("line", async (rawLine) => {
@@ -1194,6 +1242,7 @@ export async function runRepl(client: Client, options?: { initialMasked?: boolea
           console.log(`  ${c.bold(c.brightYellow("/open"))}    ${c.cyan("<用户名>")}      ${c.gray(" ".repeat(14))} 发起或进入私聊`);
           console.log(`  ${c.bold(c.brightYellow("/group"))}   ${c.cyan("<群名> <成员>")}   ${c.gray(" ".repeat(10))} 创建新群聊`);
           console.log(`  ${c.bold(c.brightYellow("/whoami"))}  ${c.gray(" ".repeat(13))}   ${c.gray(" ".repeat(14))} 查看当前账号、加密与看图协议状态`);
+          console.log(`  ${c.bold(c.brightYellow("/update"))}  ${c.cyan("[--check|--force]")} ${c.gray(" ".repeat(10))} 检查并一键增量热更新 CLI 到最新版本`);
           console.log(`  ${c.bold(c.brightYellow("/mask"))}    ${c.gray(" ".repeat(13))}   ${c.gray("(简写: /mk, /m; 或直接敲 m 回车 / 连按两次Esc / Ctrl+B)")} 极速切换到 Codex 伪装`);
           console.log(`  ${c.bold(c.brightYellow("/unmask"))}  ${c.gray(" ".repeat(13))}   ${c.gray("(简写: /umk, /um; 亦可按两次Esc / Ctrl+B 或输入 exit)")} 退出掩护恢复聊天`);
           console.log(`  ${c.bold(c.brightYellow("/clear"))}   ${c.gray(" ".repeat(13))}   ${c.gray("(简写: /c)")}   清屏并刷新当前会话`);
@@ -1601,6 +1650,38 @@ export async function runRepl(client: Client, options?: { initialMasked?: boolea
           console.log("");
           break;
 
+        case "update": {
+          const tokens = arg.split(/\s+/).filter(Boolean);
+          const checkOnly = tokens.includes("--check");
+          const force = tokens.includes("--force");
+          const currentVersion = readCurrentVersion();
+          try {
+            const latest = await client.latestCliRelease();
+            if (!latest) {
+              console.log(c.gray(`  当前版本：v${currentVersion}（服务端尚未发布更新包）`));
+              break;
+            }
+            const cmp = compareSemver(latest.version, currentVersion);
+            if (cmp <= 0 && !force) {
+              console.log(c.green(`  当前已是最新版本（v${currentVersion}）`));
+              break;
+            }
+            console.log(`  ${c.brightCyan(`发现新版本 v${latest.version}`)} ${c.gray(`(当前 v${currentVersion} · ${formatSize(latest.size)})`)}`);
+            if (latest.notes) console.log(`  ${c.dim(`更新内容: ${latest.notes}`)}`);
+            if (checkOnly) {
+              console.log(c.gray("  输入 /update 即可一键热更新"));
+              break;
+            }
+            console.log(c.dim("  正在下载并校验更新包..."));
+            const bytes = await client.downloadCliBundle(latest.version);
+            const result = applyUpdateBundle(bytes, latest, detectInstallLayout(), { force });
+            console.log(`  ${c.bold(c.brightGreen(`升级成功！已更新至 v${result.version}`))} ${c.gray(`(输入 /q 退出并重新打开 chat-lite 生效)`)}`);
+          } catch (err) {
+            console.log(c.red(`  [更新失败: ${err instanceof Error ? err.message : err}]`));
+          }
+          break;
+        }
+
         case "clear":
         case "c":
           if (isMasked) {
@@ -1712,6 +1793,8 @@ export async function runRepl(client: Client, options?: { initialMasked?: boolea
   });
 
   rl.on("close", () => {
+    clearInterval(keepAliveTimer);
+    stopTokenSync();
     process.off("exit", onProcessExit);
     previewManager.cleanup();
     imageCache.clear();

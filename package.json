@@ -13,6 +13,7 @@
     "db:migrate": "pnpm --filter @chat-lite/server prisma:migrate",
     "invite:create": "pnpm --filter @chat-lite/server invite:create",
     "cli": "pnpm --filter @chat-lite/cli dev",
-    "cli:package": "node scripts/package-cli.mjs"
+    "cli:package": "node scripts/package-cli.mjs",
+    "cli:publish": "node scripts/publish-cli.mjs"
   }
 }

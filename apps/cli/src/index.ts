@@ -5,8 +5,9 @@ import { dirname, resolve } from "node:path";
 import { commands } from "./commands";
 import { fail, info } from "./log";
 import { readConfig } from "./store";
+import { readCurrentVersion } from "./updater";
 
-const VERSION = "0.1.2";
+const VERSION = readCurrentVersion();
 
 function findDefaultCa(): string | undefined {
   const execDir = dirname(process.execPath);

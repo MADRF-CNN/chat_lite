@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { AuthResponse, ConversationDto, MessageDto, UserSummary } from "@chat-lite/shared";
+import type { AuthResponse, CliReleaseManifest, ConversationDto, MessageDto, UserSummary } from "@chat-lite/shared";
 import { createE2ee, generateIdentity, type E2ee } from "./crypto";
 import { findDesktopIdentity, readConfig, readSecrets, writeConfig, writeSecrets, type Identity, type Secrets } from "./store";
 import { info, warn } from "./log";
@@ -37,45 +37,94 @@ async function jsonFetch<T>(url: string, init: RequestInit = {}): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-class Transport {
+export class Transport {
   accessToken: string;
   user?: UserSummary;
+  private refreshPromise: Promise<boolean> | null = null;
+  private readonly tokenListeners = new Set<(token: string) => void>();
 
-  constructor(readonly apiUrl: string, private readonly secrets: Secrets, accessToken: string, user?: UserSummary) {
+  constructor(
+    readonly apiUrl: string,
+    private readonly secrets: Secrets,
+    accessToken: string,
+    user?: UserSummary,
+    private readonly readLatestSecrets: () => Secrets = readSecrets,
+    private readonly persistSecrets: (next: Secrets) => void = writeSecrets,
+  ) {
     this.accessToken = accessToken;
     this.user = user;
   }
 
+  onAccessTokenRefreshed(listener: (token: string) => void) {
+    this.tokenListeners.add(listener);
+    return () => { this.tokenListeners.delete(listener); };
+  }
+
   async request<T>(path: string, init: RequestInit = {}, retry = true): Promise<T> {
+    const usedToken = this.accessToken;
     const headers = new Headers(init.headers);
     if (init.body && !(init.body instanceof FormData) && !headers.has("Content-Type")) {
       headers.set("Content-Type", "application/json");
     }
-    if (this.accessToken) headers.set("Authorization", `Bearer ${this.accessToken}`);
+    if (usedToken) headers.set("Authorization", `Bearer ${usedToken}`);
     const response = await fetch(`${this.apiUrl}/api${path}`, { ...init, headers });
-    if (response.status === 401 && retry && await this.refresh()) return this.request<T>(path, init, false);
+    if (response.status === 401 && retry) {
+      if (this.accessToken && this.accessToken !== usedToken) {
+        return this.request<T>(path, init, false);
+      }
+      if (await this.refresh()) return this.request<T>(path, init, false);
+    }
     if (!response.ok) throw new Error(await errorMessage(response));
     return response.json() as Promise<T>;
   }
 
   async fetchBytes(path: string, retry = true): Promise<Uint8Array> {
+    const usedToken = this.accessToken;
     const response = await fetch(`${this.apiUrl}/api${path}`, {
-      headers: this.accessToken ? { Authorization: `Bearer ${this.accessToken}` } : undefined,
+      headers: usedToken ? { Authorization: `Bearer ${usedToken}` } : undefined,
     });
-    if (response.status === 401 && retry && await this.refresh()) return this.fetchBytes(path, false);
+    if (response.status === 401 && retry) {
+      if (this.accessToken && this.accessToken !== usedToken) {
+        return this.fetchBytes(path, false);
+      }
+      if (await this.refresh()) return this.fetchBytes(path, false);
+    }
     if (!response.ok) throw new Error(await errorMessage(response));
     return new Uint8Array(await response.arrayBuffer());
   }
 
-  async refresh() {
-    const refreshToken = this.secrets.refreshToken;
+  async refresh(): Promise<boolean> {
+    if (!this.refreshPromise) {
+      this.refreshPromise = this.performRefresh().finally(() => {
+        this.refreshPromise = null;
+      });
+    }
+    return this.refreshPromise;
+  }
+
+  private async performRefresh(): Promise<boolean> {
+    const diskSecrets = this.readLatestSecrets();
+    const refreshToken = diskSecrets.refreshToken || this.secrets.refreshToken;
     if (!refreshToken) return false;
-    const response = await fetch(`${this.apiUrl}/api/auth/refresh`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ refreshToken }) });
+    let response: Response;
+    try {
+      response = await fetch(`${this.apiUrl}/api/auth/refresh`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ refreshToken }),
+      });
+    } catch {
+      return false;
+    }
     if (!response.ok) return false;
     const auth = await response.json() as AuthResponse;
     this.accessToken = auth.accessToken;
     this.secrets.refreshToken = auth.refreshToken;
-    writeSecrets(this.secrets);
+    const mergedSecrets: Secrets = {
+      identities: { ...diskSecrets.identities, ...this.secrets.identities },
+      refreshToken: auth.refreshToken,
+    };
+    this.persistSecrets(mergedSecrets);
     if (auth.user) {
       this.user = auth.user;
       const existing = readConfig();
@@ -83,6 +132,7 @@ class Transport {
         writeConfig({ ...existing, user: auth.user });
       }
     }
+    for (const listener of this.tokenListeners) listener(this.accessToken);
     return true;
   }
 }
@@ -163,6 +213,10 @@ export class Client {
     return this.transport.refresh();
   }
 
+  onAccessTokenRefreshed(listener: (token: string) => void) {
+    return this.transport.onAccessTokenRefreshed(listener);
+  }
+
   listConversations() {
     return this.transport.request<ConversationDto[]>("/conversations");
   }
@@ -212,6 +266,15 @@ export class Client {
 
   markRead(conversationId: string, messageId: string) {
     return this.transport.request<{ ok: boolean }>(`/conversations/${conversationId}/read`, { method: "POST", body: JSON.stringify({ messageId }) });
+  }
+
+  async latestCliRelease(): Promise<CliReleaseManifest | null> {
+    const res = await this.transport.request<{ latest: CliReleaseManifest | null }>("/releases/cli/latest");
+    return res.latest ?? null;
+  }
+
+  downloadCliBundle(version: string): Promise<Uint8Array> {
+    return this.transport.fetchBytes(`/releases/cli/bundle/${encodeURIComponent(version)}`);
   }
 
   async logout() {

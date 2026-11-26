@@ -7,6 +7,7 @@ import { MessagesModule } from "./messages/messages.module";
 import { AttachmentsModule } from "./attachments/attachments.module";
 import { PrismaModule } from "./prisma/prisma.module";
 import { RealtimeModule } from "./realtime/realtime.module";
+import { ReleasesModule } from "./releases/releases.module";
 
 @Module({
   imports: [
@@ -27,6 +28,7 @@ import { RealtimeModule } from "./realtime/realtime.module";
     MessagesModule,
     AttachmentsModule,
     RealtimeModule,
+    ReleasesModule,
   ],
 })
 export class AppModule {}

@@ -43,7 +43,7 @@ Chat Lite CLI 是一款轻量、高速的终端即时聊天客户端，与 Chat 
 
 ### 2.1 macOS 安装指南（Apple Silicon & Intel 通用）
 
-获取压缩包：`chat-lite-cli-macos-v0.1.2.zip`
+获取压缩包：`chat-lite-cli-macos-v0.1.3.zip`
 
 #### 方式一：一键全局安装（推荐）
 
@@ -92,7 +92,7 @@ xattr -dr com.apple.quarantine .
 
 ### 2.2 Windows 安装指南（64 位 Windows 10 / 11）
 
-获取压缩包：`chat-lite-cli-windows-x64-v0.1.2.zip`
+获取压缩包：`chat-lite-cli-windows-x64-v0.1.3.zip`
 
 > **终端推荐**：强烈建议使用 **Windows Terminal**（Windows 11 已自带，Windows 10 可在 Microsoft Store 免费安装）搭配 PowerShell，或使用 **WezTerm**（支持高清内联看图）。请尽量避免使用老旧的默认 CMD 窗口，以获得最佳的中文显示、ANSI 色彩与图片渲染体验。
 
@@ -192,6 +192,7 @@ chat-lite -m
 | `/save [编号] [目录]` | - | 将指定图片解密并保存到本地目录（默认最新一张、当前目录） | `/save 1 ~/Downloads` |
 | `/autoimg [on\|off]` | - | 开启或关闭收到新图片时自动内联预览缩略图 | `/autoimg on` |
 | `/whoami` | - | 查看当前登录账号、加密状态与当前终端看图协议 | `/whoami` |
+| `/update [--check]` | - | 检查并一键增量热更新 CLI 到服务端最新版本（约 40KB，免重装、保留配置与私钥） | `/update` |
 | `/mask` | `/mk`、`/m`、`/boss` | 瞬间进入 Codex 伪装模式（也可直接敲 `m` 回车或按快捷键） | `/m` |
 | `/unmask` | `/umk`、`/um`、`/chat` | 退出伪装模式，恢复聊天界面 | `/um` |
 | `/clear` | `/c` | 清屏并重新绘制当前会话与最近消息 | `/c` |
@@ -370,6 +371,10 @@ chat-lite download alice <消息ID> --out ./downloads
 
 # 持续监听实时消息（Ctrl+C 退出，加 --read 自动标已读）
 chat-lite watch --read
+
+# 在线检查并一键增量热更新（无需重新下载压缩包、保留配置与私钥）
+chat-lite update --check              # 仅检查是否有新版本
+chat-lite update                      # 自动下载、校验 SHA-256 并原地升级
 
 # 查看命令帮助或版本
 chat-lite help

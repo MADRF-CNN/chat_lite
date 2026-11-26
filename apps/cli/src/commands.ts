@@ -12,6 +12,7 @@ import { ask, askHidden } from "./prompt";
 import { configDir, clearConfig, readConfig, readSecrets, rememberCa, writeSecrets } from "./store";
 import { watch } from "./watch";
 import { runRepl } from "./repl";
+import { applyUpdateBundle, compareSemver, detectInstallLayout, readCurrentVersion } from "./updater";
 
 export type Command = { usage: string; summary: string; run: (args: string[]) => Promise<void> };
 
@@ -390,6 +391,46 @@ const chatCommand: Command = {
   },
 };
 
+const updateCommand: Command = {
+  usage: "chat-lite update [--check] [--force] [--server <地址>]",
+  summary: "检查并增量热更新 CLI 到服务端最新版本（无需重新安装，保留配置与私钥）",
+  async run(args) {
+    const { values } = parseFlags(args, {
+      ...serverFlag,
+      check: { type: "boolean" },
+      force: { type: "boolean" },
+    });
+    const checkOnly = flagBool(values, "check");
+    const force = flagBool(values, "force");
+    const currentVersion = readCurrentVersion();
+    const client = await restore(values);
+    const latest = await client.latestCliRelease();
+    if (!latest) {
+      info(`当前版本：v${currentVersion}（服务端尚未发布更新包）`);
+      return;
+    }
+
+    const cmp = compareSemver(latest.version, currentVersion);
+    if (cmp <= 0 && !force) {
+      info(`当前已是最新版本（v${currentVersion}）`);
+      return;
+    }
+
+    info(`发现新版本：v${latest.version}（当前 v${currentVersion}，包体 ${formatSize(latest.size)}）`);
+    if (latest.notes) info(`更新内容：${latest.notes}`);
+    if (checkOnly) {
+      info("执行 chat-lite update 即可一键升级。");
+      return;
+    }
+
+    info("正在下载并校验更新包...");
+    const bytes = await client.downloadCliBundle(latest.version);
+    const layout = detectInstallLayout();
+    const result = applyUpdateBundle(bytes, latest, layout, { force });
+    info(`升级成功！已更新至 v${result.version}（共更新 ${result.fileCount} 个核心文件，配置与私钥已保留）`);
+  },
+};
+
 export const commands: Record<string, Command> = {
   chat: chatCommand,
   repl: chatCommand,
@@ -406,4 +447,5 @@ export const commands: Record<string, Command> = {
   read,
   download,
   watch: watchCommand,
+  update: updateCommand,
 };

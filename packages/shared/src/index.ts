@@ -77,3 +77,20 @@ export type ServerToClientEvents = {
 export type ClientToServerEvents = {
   "conversation:join": (conversationId: string) => void;
 };
+
+export type CliReleaseManifest = {
+  version: string;
+  publishedAt: string;
+  notes?: string;
+  sha256: string;
+  size: number;
+  depsHash: string;
+  minNodeMajor: number;
+};
+
+export type CliUpdateBundle = {
+  version: string;
+  depsHash: string;
+  notes?: string;
+  files: Record<string, string>;
+};
