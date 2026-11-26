@@ -20,6 +20,10 @@ function rgb(r: number, g: number, b: number, text: string): string {
   return useColor() ? `\x1b[38;2;${r};${g};${b}m${text}\x1b[39m` : text;
 }
 
+function rgbOnDark(r: number, g: number, b: number, text: string): string {
+  return useColor() ? `\x1b[38;2;${r};${g};${b};48;2;18;18;22m${text}\x1b[39;49m` : text;
+}
+
 function shortCwd(cwd: string): string {
   const home = homedir();
   if (cwd === home) return "~";
@@ -106,28 +110,29 @@ export const MASK_SKINS: MaskSkin[] = [
   {
     id: "claude",
     name: "Claude Code",
-    description: "Claude Code 像素吉祥物终端界面",
-    prompt: () => `${c.bold(c.brightWhite("❯"))} `,
+    description: "Claude Code 橘色像素吉祥物终端界面",
+    prompt: () => `${rgb(245, 132, 66, "❯")} `,
     headerLines: (cwd) => {
       const dir = truncate(shortCwd(cwd), 44);
-      const coral = (s: string) => rgb(217, 119, 87, s);
+      const orange = (s: string) => rgb(245, 132, 66, s);
+      const orangeEye = (s: string) => rgbOnDark(245, 132, 66, s);
       const innerW = 66;
       const titlePlain = " Claude Code v2.1.14 ";
-      const borderTop = `${coral("╭───")}${c.bold(c.brightWhite(" Claude Code "))}${c.dim("v2.1.14 ")}${coral("─".repeat(innerW - 3 - titlePlain.length) + "╮")}`;
-      const borderBot = coral(`╰${"─".repeat(innerW)}╯`);
+      const borderTop = `${orange("╭───")}${c.bold(orange(" Claude Code "))}${c.dim("v2.1.14 ")}${orange("─".repeat(innerW - 3 - titlePlain.length) + "╮")}`;
+      const borderBot = orange(`╰${"─".repeat(innerW)}╯`);
       const row = (styled: string, plain: string) =>
-        `${coral("│")} ${styled}${padRight(plain, innerW - 2)} ${coral("│")}`;
+        `${orange("│")} ${styled}${padRight(plain, innerW - 2)} ${orange("│")}`;
 
-      // Iconic Claude Code pixel mascot (Clawd) in Anthropic terracotta coral
-      const m1 = coral("  ▐▛███▜▌  ");
-      const m2 = coral(" ▝▜█████▛▘ ");
-      const m3 = coral("   ▘▘ ▝▝   ");
+      // Authentic Claude Code pixel mascot (Clawd) in vivid Claude orange with black eyes
+      const m1 = `  ${orange("▐")}${orangeEye("▛")}${orange("███")}${orangeEye("▜")}${orange("▌")}  `;
+      const m2 = ` ${orange("▝▜█████▛▘")} `;
+      const m3 = `   ${orange("▘▘ ▝▝")}   `;
 
       const r1Plain = "  xxxxxxx   Welcome back!";
       const r1Styled = `${m1} ${c.bold(c.brightWhite("Welcome back!"))}`;
 
       const r2Plain = " xxxxxxxxx  Opus 4.6 · Claude Max";
-      const r2Styled = `${m2} ${c.brightWhite("Opus 4.6")} ${c.dim("· Claude Max")}`;
+      const r2Styled = `${m2} ${orange("Opus 4.6")} ${c.dim("· Claude Max")}`;
 
       const r3Plain = `   xx xx    ${dir}`;
       const r3Styled = `${m3} ${c.dim(dir)}`;
@@ -148,16 +153,17 @@ export const MASK_SKINS: MaskSkin[] = [
     telemetryLine: (count) => c.dim(`  ⎿  hook: workspace file watcher synced (${count} events)`),
     fakeOutputLines: (prompt) => {
       const clean = prompt.slice(0, 54);
-      const coralDot = rgb(217, 119, 87, "●");
+      const orange = (s: string) => rgb(245, 132, 66, s);
+      const dot = orange("●");
       return [
-        c.dim(`✻ Thinking about "${clean}"…`),
-        `${coralDot} ${c.bold(c.brightWhite("Read"))}(${c.dim("src/services/scheduler.ts")})`,
+        orange(`✻ Thinking about "${clean}"…`),
+        `${dot} ${c.bold(c.brightWhite("Read"))}(${c.dim("src/services/scheduler.ts")})`,
         c.dim("  ⎿  Read 84 lines"),
-        `${coralDot} ${c.bold(c.brightWhite("Update"))}(${c.dim("src/services/scheduler.ts")})`,
+        `${dot} ${c.bold(c.brightWhite("Update"))}(${c.dim("src/services/scheduler.ts")})`,
         `  ${c.dim("⎿  Updated src/services/scheduler.ts with")} ${c.green("12 additions")} ${c.dim("and")} ${c.red("4 removals")}`,
-        `${coralDot} ${c.bold(c.brightWhite("Bash"))}(${c.dim("pnpm --filter @app/core test")})`,
+        `${dot} ${c.bold(c.brightWhite("Bash"))}(${c.dim("pnpm --filter @app/core test")})`,
         `  ${c.dim("⎿")}  ${c.green("PASS")} ${c.dim("src/services/scheduler.spec.ts (14 tests, 128ms)")}`,
-        `${coralDot} ${c.brightWhite("Done — added the guard and confirmed all unit tests pass.")}`,
+        `${dot} ${c.brightWhite("Done — added the guard and confirmed all unit tests pass.")}`,
         "",
       ];
     },
