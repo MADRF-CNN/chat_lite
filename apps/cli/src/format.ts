@@ -80,6 +80,53 @@ export function parseQuickQuoteShortcut(line: string): { targetToken: string; bo
   };
 }
 
+export function matchesSearchQuery(decrypted: DecryptedMessage, query: string): boolean {
+  const q = query.trim().toLowerCase();
+  if (!q) return false;
+  const rawText = decrypted.message.text ?? "";
+  if (rawText.toLowerCase().includes(q)) return true;
+  const pixelMsg = rawText ? parsePixelStickerMessage(rawText) : null;
+  if (pixelMsg && (pixelMsg.sticker.label.toLowerCase().includes(q) || pixelMsg.sticker.id.toLowerCase().includes(q))) {
+    return true;
+  }
+  if (decrypted.message.sender.displayName.toLowerCase().includes(q) || decrypted.message.sender.username.toLowerCase().includes(q)) {
+    return true;
+  }
+  const replyTo = decrypted.content?.replyTo;
+  if (replyTo && (replyTo.preview.toLowerCase().includes(q) || replyTo.senderName.toLowerCase().includes(q))) {
+    return true;
+  }
+  const attachments = decrypted.content?.attachments ?? decrypted.message.attachments ?? [];
+  if (attachments.some((a) => a.originalName.toLowerCase().includes(q))) {
+    return true;
+  }
+  return false;
+}
+
+export function highlightKeyword(
+  text: string,
+  keyword: string,
+  baseStyler: (segment: string) => string = (segment) => c.brightWhite(segment),
+): string {
+  const q = keyword.trim();
+  if (!q) return baseStyler(text);
+  const lowerText = text.toLowerCase();
+  const lowerQ = q.toLowerCase();
+  let out = "";
+  let cursor = 0;
+  while (cursor < text.length) {
+    const idx = lowerText.indexOf(lowerQ, cursor);
+    if (idx === -1) {
+      out += baseStyler(text.slice(cursor));
+      break;
+    }
+    if (idx > cursor) out += baseStyler(text.slice(cursor, idx));
+    out += c.mentionMe(text.slice(idx, idx + q.length));
+    cursor = idx + q.length;
+  }
+  return out;
+}
+
 export function decryptedLine(
   decrypted: DecryptedMessage,
   me: UserSummary,
@@ -87,6 +134,7 @@ export function decryptedLine(
   imageIndex?: (attachmentId: string) => number | undefined,
   conversation?: ConversationDto,
   messageIndex?: number,
+  searchKeyword?: string,
 ) {
   const own = decrypted.message.sender.id === me.id;
   const idxPrefix = messageIndex !== undefined ? `${c.dim(`#${messageIndex}`)} ` : "";
@@ -99,7 +147,10 @@ export function decryptedLine(
   const attachments = attachmentSummary(decrypted, imageIndex);
   const isGroup = conversation?.type === "GROUP";
   const groupMembers = isGroup ? conversation.members : [];
-  const styleText = (text: string) => (isGroup ? highlightMentions(text, me, groupMembers) : c.brightWhite(text));
+  const styleText = (text: string) => {
+    if (searchKeyword) return highlightKeyword(text, searchKeyword);
+    return isGroup ? highlightMentions(text, me, groupMembers) : c.brightWhite(text);
+  };
   const pingBadge = !own && isGroup && isMentioningMe(rawText, me, conversation)
     ? `${c.alertBadge(" @你 ")} `
     : "";

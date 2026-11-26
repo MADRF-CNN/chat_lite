@@ -1,6 +1,6 @@
 {
   "name": "@chat-lite/cli",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Chat Lite command line client",
   "private": true,
   "bin": {

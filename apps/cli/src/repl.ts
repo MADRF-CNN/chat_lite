@@ -18,8 +18,10 @@ import {
   type PixelSticker,
 } from "./pixel";
 import { completeGroupMention, highlightMentions, isMentioningMe } from "./mention";
+import { allMaskSkinKeys, isValidMaskPreference, MASK_SKINS, resolveMaskSkin, type MaskSkin } from "./mask";
+import { readMaskSkin, saveMaskSkin } from "./store";
 import { applyUpdateBundle, compareSemver, detectInstallLayout, readCurrentVersion } from "./updater";
-import { decryptedLine, formatQuoteBlock, formatSize, formatTime, parseQuickQuoteShortcut, quotePreviewOf, shortId } from "./format";
+import { decryptedLine, formatQuoteBlock, formatSize, formatTime, matchesSearchQuery, parseQuickQuoteShortcut, quotePreviewOf, shortId } from "./format";
 import {
   PreviewManager,
   clearTerminalImages,
@@ -64,9 +66,12 @@ const SLASH_COMMANDS = [
   "/h",
   "/more",
   "/mo",
+  "/find",
+  "/f",
   "/open",
   "/group",
   "/whoami",
+  "/skin",
   "/update",
   "/clear",
   "/c",
@@ -142,69 +147,6 @@ function conversationTitle(conversation: ConversationDto, meId: string) {
   return other ? `${other.displayName} (@${other.username})` : "私聊";
 }
 
-function simulateCodexOutput(prompt: string) {
-  const cleanPrompt = prompt.slice(0, 60);
-  const snippets = [
-    `// [Codex] Synthesized implementation for "${cleanPrompt}"
-export async function processTask<T>(input: T[], options?: TaskOptions): Promise<Result<T>> {
-  const pipeline = new StreamTransformer({ concurrency: 4, backpressure: true });
-  const results = await pipeline.mapParallel(input, async (item) => {
-    return transformNode(item, options?.strict ?? false);
-  });
-  return { status: "success", count: results.length, data: results };
-}
-// AST analysis complete: 0 warnings, optimized via inline heuristics.`,
-
-    `# [Codex] Generated pipeline script for "${cleanPrompt}"
-def optimize_execution_flow(records: list[dict], threshold: float = 0.95) -> dict:
-    """Vectorized stream processor with sliding window aggregation."""
-    filtered = [r for r in records if r.get("score", 0) >= threshold]
-    summary = {
-        "total": len(records),
-        "retained": len(filtered),
-        "ratio": round(len(filtered) / max(len(records), 1), 4),
-    }
-    return summary
-# Compilation: LLVM IR generated (target: x86_64-apple-darwin).`,
-
-    `// [Codex] Concurrent worker implementation for "${cleanPrompt}"
-pub struct TaskDispatcher {
-    pool: ThreadPool,
-    metrics: Arc<AtomicU64>,
-}
-
-impl TaskDispatcher {
-    pub fn dispatch<F>(&self, job: F) -> Result<(), DispatchError>
-    where
-        F: FnOnce() + Send + 'static,
-    {
-        self.metrics.fetch_add(1, Ordering::Relaxed);
-        self.pool.execute(job);
-        Ok(())
-    }
-}
-// Benchmark: latency 1.4µs/op, memory footprint negligible.`,
-
-    `-- [Codex] Query plan and optimizer for "${cleanPrompt}"
-SELECT 
-    DATE_TRUNC('hour', created_at) AS event_hour,
-    COUNT(DISTINCT session_id) AS active_sessions,
-    PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY response_time_ms) AS p99_latency
-FROM telemetry_events
-WHERE status_code < 500 AND partition_key >= CURRENT_DATE - INTERVAL '7 days'
-GROUP BY 1
-ORDER BY 1 DESC;
--- Query plan: Index Scan using idx_telemetry_created_at (cost=0.42..18.25 rows=240)`
-  ];
-
-  const selected = snippets[Math.floor(Math.random() * snippets.length)] ?? "";
-  console.log(c.dim("[codex] Analyzing instruction..."));
-  console.log(c.dim("[codex] Generating candidate implementation (temperature=0.2):"));
-  console.log("");
-  console.log(c.brightWhite(selected));
-  console.log("");
-}
-
 export async function runRepl(client: Client, options?: { initialMasked?: boolean }) {
   let conversations = await client.listConversations();
   if (!conversations.length) {
@@ -218,6 +160,8 @@ export async function runRepl(client: Client, options?: { initialMasked?: boolea
 
   let isMasked = Boolean(options?.initialMasked);
   let maskedUnreadCount = 0;
+  let maskSkinPref = readMaskSkin() ?? "codex";
+  let activeMaskSkin: MaskSkin = resolveMaskSkin(maskSkinPref);
 
   type IndexedImage = {
     index: number;
@@ -618,17 +562,14 @@ export async function runRepl(client: Client, options?: { initialMasked?: boolea
 
   function printMaskedHeader() {
     process.stdout.write(`${clearTerminalImages()}\x1b[2J\x1b[3J\x1b[H`);
-    console.log(c.bold(c.brightWhite("OpenAI Codex (v0.14.2) [Interactive Shell]")));
-    console.log(c.dim(`Workspace: ${process.cwd()}`));
-    console.log(c.dim("Model: codex-davinci-002-optimized | Context: 8k tokens | Mode: Code Synthesis"));
-    console.log(c.gray("-".repeat(70)));
-    console.log(c.dim("Type instructions or code prompt."));
-    console.log("");
+    for (const line of activeMaskSkin.headerLines(process.cwd())) {
+      console.log(line);
+    }
   }
 
   function getPrompt() {
     if (isMasked) {
-      return `${c.bold(c.brightCyan("codex"))} ${c.gray(">")} `;
+      return activeMaskSkin.prompt();
     }
     if (!activeConversation) return `${c.gray("[无会话]")} ${c.bold(c.cyan(">"))} `;
     const title = activeConversation.type === "GROUP"
@@ -658,7 +599,7 @@ export async function runRepl(client: Client, options?: { initialMasked?: boolea
   }
 
   async function fetchMessageBatch(conversationId: string, startCursor: string | undefined, targetCount: number) {
-    const capped = Math.min(Math.max(1, targetCount), 500);
+    const capped = Math.min(Math.max(1, targetCount), 1000);
     const collected: Awaited<ReturnType<typeof client.messages>>["items"] = [];
     let cursor = startCursor;
     while (collected.length < capped) {
@@ -832,6 +773,10 @@ export async function runRepl(client: Client, options?: { initialMasked?: boolea
           const hits = candidates.filter((item) => item.startsWith(parts[1]!));
           return [hits.map((h) => `${parts[0]} ${h}`), line];
         }
+        if (parts[0] === "/skin" && parts.length === 2) {
+          const hits = allMaskSkinKeys().filter((item) => item.startsWith(parts[1]!.toLowerCase()));
+          return [hits.map((h) => `${parts[0]} ${h}`), line];
+        }
       }
       const colonComp = completeColonSticker(line);
       if (colonComp) return colonComp;
@@ -870,7 +815,7 @@ export async function runRepl(client: Client, options?: { initialMasked?: boolea
 
       if (isMasked) {
         maskedUnreadCount++;
-        safePrint(rl, c.dim(`[daemon] background telemetry synced (${maskedUnreadCount} items)`));
+        safePrint(rl, activeMaskSkin.telemetryLine(maskedUnreadCount));
         return;
       }
 
@@ -938,6 +883,7 @@ export async function runRepl(client: Client, options?: { initialMasked?: boolea
   function enterMaskMode() {
     isMasked = true;
     maskedUnreadCount = 0;
+    activeMaskSkin = resolveMaskSkin(maskSkinPref);
     previewManager.cleanup();
     imageCache.clear();
     pendingImages = [];
@@ -1153,7 +1099,9 @@ export async function runRepl(client: Client, options?: { initialMasked?: boolea
         return;
       }
 
-      simulateCodexOutput(line);
+      for (const outLine of activeMaskSkin.fakeOutputLines(line)) {
+        console.log(outLine);
+      }
       rl.prompt();
       return;
     }
@@ -1239,9 +1187,11 @@ export async function runRepl(client: Client, options?: { initialMasked?: boolea
           console.log(`  ${c.bold(c.brightYellow("/list"))}    ${c.gray(" ".repeat(13))}   ${c.gray("(简写: /ls)")}  列出全部会话及未读数`);
           console.log(`  ${c.bold(c.brightYellow("/history"))} ${c.cyan("[条数]")}        ${c.gray("(简写: /h)")}   查看最近历史记录 (默认 20 条，支持跨页拉取)`);
           console.log(`  ${c.bold(c.brightYellow("/more"))}    ${c.cyan("[条数]")}        ${c.gray("(简写: /mo)")}  继续往前翻一页更早的历史消息 (默认每次 20 条)`);
+          console.log(`  ${c.bold(c.brightYellow("/find"))}    ${c.cyan("<词> [--limit N]")} ${c.gray("(简写: /f)")}   本地解密搜索当前会话历史记录并高亮命中词`);
           console.log(`  ${c.bold(c.brightYellow("/open"))}    ${c.cyan("<用户名>")}      ${c.gray(" ".repeat(14))} 发起或进入私聊`);
           console.log(`  ${c.bold(c.brightYellow("/group"))}   ${c.cyan("<群名> <成员>")}   ${c.gray(" ".repeat(10))} 创建新群聊`);
           console.log(`  ${c.bold(c.brightYellow("/whoami"))}  ${c.gray(" ".repeat(13))}   ${c.gray(" ".repeat(14))} 查看当前账号、加密与看图协议状态`);
+          console.log(`  ${c.bold(c.brightYellow("/skin"))}    ${c.cyan("[皮肤名]")}      ${c.gray("(codex/claude/build/k8s/random)")} 切换老板键伪装皮肤并记住偏好`);
           console.log(`  ${c.bold(c.brightYellow("/update"))}  ${c.cyan("[--check|--force]")} ${c.gray(" ".repeat(10))} 检查并一键增量热更新 CLI 到最新版本`);
           console.log(`  ${c.bold(c.brightYellow("/mask"))}    ${c.gray(" ".repeat(13))}   ${c.gray("(简写: /mk, /m; 或直接敲 m 回车 / 连按两次Esc / Ctrl+B)")} 极速切换到 Codex 伪装`);
           console.log(`  ${c.bold(c.brightYellow("/unmask"))}  ${c.gray(" ".repeat(13))}   ${c.gray("(简写: /umk, /um; 亦可按两次Esc / Ctrl+B 或输入 exit)")} 退出掩护恢复聊天`);
@@ -1584,6 +1534,79 @@ export async function runRepl(client: Client, options?: { initialMasked?: boolea
           }
           const moreCount = arg ? parseInt(arg, 10) : 20;
           await showOlderHistory(activeConversation, isNaN(moreCount) || moreCount <= 0 ? 20 : moreCount);
+          break;
+        }
+
+        case "find":
+        case "f": {
+          if (!activeConversation) {
+            console.log(c.yellow("暂无活跃会话，请先 /list 选择会话"));
+            break;
+          }
+          let scanLimit = 200;
+          let queryText = arg;
+          const limitMatch = arg.match(/(?:^|\s)--limit(?:=|\s+)(\d+)(?:\s|$)/i);
+          if (limitMatch) {
+            scanLimit = Math.min(1000, Math.max(10, Number.parseInt(limitMatch[1]!, 10) || 200));
+            queryText = arg.replace(limitMatch[0], " ").trim();
+          }
+          if (!queryText) {
+            console.log(c.gray("用法: /find <关键词> [--limit 200]  (本地解密搜索当前会话，最高扫描 1000 条)"));
+            break;
+          }
+          console.log("");
+          printSectionHeader(`本地加密搜索 “${queryText}” (扫描最近 ${scanLimit} 条)`);
+          try {
+            const batch = await fetchMessageBatch(activeConversation.id, undefined, scanLimit);
+            let hits = 0;
+            for (const raw of batch.items) {
+              try {
+                const decrypted = await client.e2ee.decryptMessage(raw, activeConversation);
+                if (!matchesSearchQuery(decrypted, queryText)) continue;
+                registerImages(decrypted, activeConversation);
+                const msgEntry = registerMessage(decrypted);
+                console.log("  " + decryptedLine(decrypted, client.user, false, lookupImageIndex, activeConversation, msgEntry.index, queryText));
+                hits += 1;
+              } catch {
+                // Skip undecryptable messages
+              }
+            }
+            if (hits === 0) {
+              console.log(c.gray(`  [在最近 ${batch.items.length} 条消息中未找到匹配 “${queryText}” 的记录]`));
+            } else {
+              console.log("");
+              console.log(c.dim(`  [共扫描 ${batch.items.length} 条，命中 ${hits} 条；可直接用 >编号 引用回复]`));
+            }
+            console.log("");
+          } catch (cause) {
+            console.log(c.red(`  [搜索失败: ${cause instanceof Error ? cause.message : cause}]`));
+            console.log("");
+          }
+          break;
+        }
+
+        case "skin": {
+          const target = arg.trim().toLowerCase();
+          if (!target) {
+            console.log("");
+            printSectionHeader("老板键伪装皮肤 (/skin <名称> 切换)");
+            for (const skin of MASK_SKINS) {
+              const mark = maskSkinPref === skin.id ? c.bold(c.brightGreen("* ")) : "  ";
+              console.log(`${mark}${c.bold(c.brightYellow(skin.id.padEnd(8)))} ${c.brightWhite(skin.name.padEnd(22))} ${c.gray(skin.description)}`);
+            }
+            const randMark = maskSkinPref === "random" ? c.bold(c.brightGreen("* ")) : "  ";
+            console.log(`${randMark}${c.bold(c.brightYellow("random".padEnd(8)))} ${c.brightWhite("随机切换".padEnd(22))} ${c.gray("每次按老板键随机换一套伪装皮肤")}`);
+            console.log("");
+            break;
+          }
+          if (!isValidMaskPreference(target)) {
+            console.log(c.yellow(`未知伪装皮肤 "${target}"，可选：${allMaskSkinKeys().join(" / ")}`));
+            break;
+          }
+          maskSkinPref = target;
+          activeMaskSkin = resolveMaskSkin(maskSkinPref);
+          saveMaskSkin(maskSkinPref);
+          console.log(`  ${c.green("已切换老板键伪装皮肤为：")}${c.bold(c.brightWhite(target === "random" ? "random (每次随机)" : `${activeMaskSkin.name} (${activeMaskSkin.id})`))}`);
           break;
         }
 

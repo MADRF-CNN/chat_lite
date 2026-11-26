@@ -17,8 +17,8 @@ const groupConv: ConversationDto = {
 };
 
 describe("desktop pixel stickers", () => {
-  it("supports 12 10x10 stickers, colon shortcut and preview formatting", () => {
-    expect(PIXEL_STICKERS.length).toBe(12);
+  it("supports 20 10x10 stickers, colon shortcut and preview formatting", () => {
+    expect(PIXEL_STICKERS.length).toBe(20);
     for (const s of PIXEL_STICKERS) {
       expect(s.grid.length).toBe(10);
       expect(s.grid.every((row) => row.length === 10)).toBe(true);

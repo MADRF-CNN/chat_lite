@@ -25,6 +25,9 @@ test("resolvePixelSticker 支持 ID、编号和中文别名查找", () => {
   assert.equal(resolvePixelSticker("狗头")?.id, "doge");
   assert.equal(resolvePixelSticker("1")?.id, "smile");
   assert.equal(resolvePixelSticker("#8")?.id, "fire");
+  assert.equal(resolvePixelSticker("吃瓜")?.id, "eyes");
+  assert.equal(resolvePixelSticker("裂开")?.id, "skull");
+  assert.equal(resolvePixelSticker("100")?.id, "100");
   assert.equal(resolvePixelSticker("unknown"), null);
 });
 

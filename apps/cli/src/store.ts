@@ -4,7 +4,7 @@ import { join } from "node:path";
 import type { UserSummary } from "@chat-lite/shared";
 
 export type Identity = { privateKey: string; publicKey: string };
-export type Config = { apiUrl: string; user: UserSummary; caPath?: string };
+export type Config = { apiUrl: string; user: UserSummary; caPath?: string; maskSkin?: string };
 export type Secrets = { refreshToken?: string; identities: Record<string, Identity> };
 
 export function configDir() {
@@ -41,6 +41,16 @@ export function rememberCa(): string | null {
   if (!caPath || !config || config.caPath === caPath) return null;
   writeConfig({ ...config, caPath });
   return caPath;
+}
+
+export function readMaskSkin(): string | undefined {
+  return readConfig()?.maskSkin;
+}
+
+export function saveMaskSkin(maskSkin: string) {
+  const config = readConfig();
+  if (!config) return;
+  writeConfig({ ...config, maskSkin });
 }
 
 export function findDesktopIdentity(userId: string): Identity | null {
